@@ -2,6 +2,9 @@
 //!
 //! SPDX-License-Identifier: MIT
 
+pub mod browser_ui;
+pub mod error_screen;
+pub mod font;
 pub mod framebuffer;
 pub mod hud;
 pub mod raycast;
@@ -11,12 +14,14 @@ mod tests {
     use super::framebuffer::{Framebuffer, VIEW_H, VIEW_W};
     use super::hud::draw_status_bar;
     use super::raycast::{
-        Camera, collect_sprites, render_sprites, render_walls, render_weapon,
+        Camera, PROJ_V, FOCAL, collect_sprites, render_sprites, render_walls, render_weapon,
     };
     use crate::data::palette;
     use crate::data::GameData;
     use crate::game::actor::Difficulty;
+    use crate::game::level::build_level;
     use crate::game::world::World;
+    use crate::data::Map;
 
     /// Render the first frame of E1M1 and dump it as a PPM for visual
     /// inspection. The test is a no-op when no data directory is available.
@@ -145,5 +150,77 @@ mod tests {
             ppm.extend_from_slice(&palette::to_rgb(idx));
         }
         std::fs::write(std::env::temp_dir().join("wolf3d_text.ppm"), ppm).unwrap();
+    }
+
+    /// Render the on-screen touch gamepad over a game frame for inspection.
+    #[test]
+    fn render_touch_controls() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+        let world = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+        let cam = Camera {
+            x: world.player.x,
+            y: world.player.y,
+            angle: world.player.angle,
+        };
+        let mut zbuf = [f32::INFINITY; VIEW_W];
+        render_walls(&mut fb, &data.vswap, &world.level, cam, &mut zbuf);
+        draw_status_bar(&mut fb, &data.vga, &world.hud);
+
+        let mut controls = crate::touch::TouchControls::default();
+        controls.enabled = true;
+        controls.movement = bevy::math::Vec2::new(0.0, 1.0);
+        controls.fire = true;
+        controls.run = true;
+        controls.weapon = Some(2);
+        crate::touch::draw_controls(&mut fb, &data.vga, &controls);
+
+        let mut ppm = format!("P6\n{} {}\n255\n", VIEW_W, VIEW_H).into_bytes();
+        for &idx in &fb.pixels {
+            ppm.extend_from_slice(&palette::to_rgb(idx));
+        }
+        std::fs::write(std::env::temp_dir().join("wolf3d_touch.ppm"), ppm).unwrap();
+    }
+
+    /// Regression: the camera sits `FOCAL` behind the player in the original,
+    /// so a wall exactly one tile away is ~81.6 px tall (not `PROJ_V`).
+    #[test]
+    fn wall_height_matches_original_projection() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+
+        let mut walls = vec![0u16; 64];
+        for y in 0..8 {
+            walls[y * 8 + 2] = 1; // solid wall spanning x = 2..3
+        }
+        let map = Map {
+            width: 8,
+            height: 8,
+            name: "test".into(),
+            walls,
+            objects: vec![0; 64],
+        };
+        let level = build_level(&map, 0, 0);
+        let cam = Camera {
+            x: 1.0,
+            y: 1.5,
+            angle: 0.0, // facing east, one tile from the wall at x=2
+        };
+        let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+        let mut zbuf = [f32::INFINITY; VIEW_W];
+        render_walls(&mut fb, &data.vswap, &level, cam, &mut zbuf);
+
+        let perp = zbuf[160];
+        assert!(
+            (perp - (1.0 + FOCAL)).abs() < 0.01,
+            "expected perp 1+FOCAL, got {perp}"
+        );
+        let height = PROJ_V / perp;
+        assert!((height - 81.6).abs() < 0.6, "unexpected wall height {height}");
     }
 }

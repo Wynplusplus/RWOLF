@@ -1,6 +1,9 @@
 target/
-data/
-WOLF3D/
+
+# Game data is not bundled. Anchor these to the repository root so they do not
+# accidentally ignore source directories such as `src/data/`.
+/data/
+/WOLF3D/
 *.WL6
 *.WL1
 

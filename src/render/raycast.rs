@@ -20,6 +20,17 @@ pub const PROJ_H: f32 = (VIEW_W as f32 / 2.0) / PLANE_LEN;
 pub const PROJ_V: f32 = PROJ_H / 2.0;
 pub const HORIZON: f32 = VIEW_3D_H as f32 / 2.0;
 
+/// `FOCALLENGTH = 0x5700`, in tiles. The original positions the camera this
+/// distance behind the player (`viewx = x - focal·cos`), so every depth used
+/// for projection is `distance + FOCAL`.
+pub const FOCAL: f32 = 0x5700 as f32 / 65536.0;
+
+/// `ACTORSIZE = 0x4000`: actors are nudged this much closer so their midpoint
+/// does not clip into an adjacent wall.
+pub const ACTOR_FUDGE: f32 = 0x4000 as f32 / 65536.0;
+/// `0x2000`: the same nudge for static objects (`TransformTile`).
+pub const STATIC_FUDGE: f32 = 0x2000 as f32 / 65536.0;
+
 /// Door texture chunks (relative to `DOORWALL = sprite_start - 8`).
 const DOOR_NORMAL: usize = 0;
 const DOOR_SIDE_H: usize = 2;
@@ -43,6 +54,14 @@ impl Camera {
     pub fn plane(&self) -> (f32, f32) {
         let (dx, dy) = self.dir();
         (-dy * PLANE_LEN, dx * PLANE_LEN)
+    }
+
+    /// The camera position, offset `FOCAL` behind the player along the view
+    /// direction (matching the original's `viewx`/`viewy`).
+    #[inline]
+    pub fn origin(&self) -> (f32, f32) {
+        let (dx, dy) = self.dir();
+        (self.x - dx * FOCAL, self.y - dy * FOCAL)
     }
 }
 
@@ -75,6 +94,12 @@ pub fn render_walls(
 
     let (dx, dy) = cam.dir();
     let (px_, py_) = cam.plane();
+    // Rays originate `FOCAL` behind the player, like the original.
+    let cam_at = Camera {
+        x: cam.x - dx * FOCAL,
+        y: cam.y - dy * FOCAL,
+        angle: cam.angle,
+    };
     let sprite_start = vswap.sprite_start as usize;
     let door_base = sprite_start.saturating_sub(8);
 
@@ -82,7 +107,7 @@ pub fn render_walls(
         let camera_x = 2.0 * x as f32 / VIEW_W as f32 - 1.0;
         let rdx = dx + px_ * camera_x;
         let rdy = dy + py_ * camera_x;
-        let hit = cast(level, cam, rdx, rdy, door_base, sprite_start);
+        let hit = cast(level, cam_at, rdx, rdy, door_base, sprite_start);
         let Some(hit) = hit else {
             zbuf[x] = f32::INFINITY;
             continue;
@@ -264,6 +289,8 @@ pub struct SpriteInstance {
     pub x: f32,
     pub y: f32,
     pub sprite: u16,
+    /// Nudge toward the viewer (`ACTORSIZE`/`0x2000` in the original).
+    pub fudge: f32,
 }
 
 /// Draw statics and actors back-to-front, clipped by the wall depth buffer.
@@ -276,6 +303,7 @@ pub fn render_sprites(
 ) {
     let (dx, dy) = cam.dir();
     let (px_, py_) = cam.plane();
+    let (ox, oy) = cam.origin();
     let det = px_ * dy - dx * py_;
     if det.abs() < 1e-9 {
         return;
@@ -285,8 +313,8 @@ pub fn render_sprites(
     let mut order: Vec<(f32, &SpriteInstance)> = sprites
         .iter()
         .map(|s| {
-            let rx = s.x - cam.x;
-            let ry = s.y - cam.y;
+            let rx = s.x - ox;
+            let ry = s.y - oy;
             let depth = inv_det * (-py_ * rx + px_ * ry);
             (depth, s)
         })
@@ -295,11 +323,12 @@ pub fn render_sprites(
     order.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     for (depth, s) in order {
-        let rx = s.x - cam.x;
-        let ry = s.y - cam.y;
+        let rx = s.x - ox;
+        let ry = s.y - oy;
         let transform_x = inv_det * (dy * rx - dx * ry);
-        let screen_x = (VIEW_W as f32 / 2.0) * (1.0 + transform_x / depth);
-        let size = PROJ_V / depth;
+        let proj_depth = (depth - s.fudge).max(0.05);
+        let screen_x = (VIEW_W as f32 / 2.0) * (1.0 + transform_x / proj_depth);
+        let size = PROJ_V / proj_depth;
         if size < 1.0 {
             continue;
         }
@@ -318,7 +347,7 @@ pub fn render_sprites(
             continue;
         }
         for x in x_start..x_end {
-            if zbuf[x as usize] < depth {
+            if zbuf[x as usize] < proj_depth {
                 continue;
             }
             let tex_x = (((x as f32 - left) / size) * 64.0) as i32;
@@ -338,12 +367,13 @@ pub fn render_sprites(
     }
 }
 
-/// Draw a full-view-height weapon sprite centred at the bottom of the view.
+/// Draw the player's weapon, scaled the way the original's `SimpleScaleShape`
+/// does: to half the view height, centred vertically.
 pub fn render_weapon(fb: &mut Framebuffer, vswap: &VSwap, sprite: u16) {
     let Some(spr) = vswap.sprite(sprite as usize) else {
         return;
     };
-    let size = VIEW_3D_H as f32;
+    let size = VIEW_3D_H as f32 / 2.0;
     let left = VIEW_W as f32 / 2.0 - size / 2.0;
     let top = HORIZON - size / 2.0;
     let x_start = left.floor().max(0.0) as i32;
@@ -376,6 +406,7 @@ pub fn collect_sprites(level: &Level, actors: &[Actor], view_angle: f32) -> Vec<
                 x: s.x as f32 + 0.5,
                 y: s.y as f32 + 0.5,
                 sprite: s.sprite,
+                fudge: STATIC_FUDGE,
             });
         }
     }
@@ -385,6 +416,7 @@ pub fn collect_sprites(level: &Level, actors: &[Actor], view_angle: f32) -> Vec<
                 x: a.x,
                 y: a.y,
                 sprite,
+                fudge: ACTOR_FUDGE,
             });
         }
     }

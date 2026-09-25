@@ -50,6 +50,33 @@ impl Framebuffer {
         }
     }
 
+    /// Draw a filled circle (used by the touch-control overlay).
+    pub fn circle(&mut self, cx: i32, cy: i32, r: i32, color: u8) {
+        let r2 = r * r;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy <= r2 {
+                    self.put(cx + dx, cy + dy, color);
+                }
+            }
+        }
+    }
+
+    /// Draw a one-pixel-wide circle outline.
+    pub fn ring(&mut self, cx: i32, cy: i32, r: i32, color: u8) {
+        let r2 = r * r;
+        let inner = (r - 1).max(0);
+        let inner2 = inner * inner;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let d2 = dx * dx + dy * dy;
+                if d2 <= r2 && d2 >= inner2 {
+                    self.put(cx + dx, cy + dy, color);
+                }
+            }
+        }
+    }
+
     /// Blit an indexed image. When `transparent` is `Some`, that index is
     /// skipped.
     pub fn blit(

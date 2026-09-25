@@ -403,18 +403,20 @@ pub fn spawn_actors(
                 238..=241 if medium => spawn(ActorKind::Mutant, o - 238, true),
                 252..=255 if hard => spawn(ActorKind::Mutant, o - 252, false),
                 256..=259 if hard => spawn(ActorKind::Mutant, o - 256, true),
-                // Bosses.
-                214 => spawn(ActorKind::Hans, 0, false),
-                197 => spawn(ActorKind::Gretel, 0, false),
-                215 => spawn(ActorKind::Gift, 0, false),
-                179 => spawn(ActorKind::Fat, 0, false),
-                196 => spawn(ActorKind::Schabbs, 0, false),
-                160 => spawn(ActorKind::FakeHitler, 0, false),
-                178 => spawn(ActorKind::Hitler, 0, false),
-                224 => spawn(ActorKind::Blinky, 0, false),
-                225 => spawn(ActorKind::Clyde, 0, false),
-                226 => spawn(ActorKind::Pinky, 0, false),
-                227 => spawn(ActorKind::Inky, 0, false),
+                // Bosses don't use the map direction in the original; they
+                // start facing a fixed direction (mostly south). They wake and
+                // chase the player immediately, so this is largely transient.
+                214 => spawn(ActorKind::Hans, 3, false),
+                197 => spawn(ActorKind::Gretel, 1, false),
+                215 => spawn(ActorKind::Gift, 3, false),
+                179 => spawn(ActorKind::Fat, 1, false),
+                196 => spawn(ActorKind::Schabbs, 3, false),
+                160 => spawn(ActorKind::FakeHitler, 3, false),
+                178 => spawn(ActorKind::Hitler, 3, false),
+                224 => spawn(ActorKind::Blinky, 1, false),
+                225 => spawn(ActorKind::Clyde, 1, false),
+                226 => spawn(ActorKind::Pinky, 1, false),
+                227 => spawn(ActorKind::Inky, 1, false),
                 _ => {}
             }
         }
@@ -422,13 +424,17 @@ pub fn spawn_actors(
     out
 }
 
-/// Map a `dir` (0 north, 1 east, 2 south, 3 west) to a facing angle.
+/// Map a `dir` (0 east, 1 north, 2 west, 3 south) to a facing angle.
+///
+/// Actor spawn directions in the map use the dirtype order of the original
+/// (`east, north, west, south`), because `SpawnStand`/`SpawnPatrol` use
+/// `new->dir = dir*2` to index the 8-way direction table.
 pub fn dir_angle(dir: u16) -> f32 {
     use std::f32::consts::{FRAC_PI_2, PI};
     match dir % 4 {
-        0 => FRAC_PI_2,
-        1 => 0.0,
-        2 => -FRAC_PI_2,
-        _ => PI,
+        0 => 0.0,         // east
+        1 => FRAC_PI_2,   // north
+        2 => PI,          // west
+        _ => -FRAC_PI_2,  // south
     }
 }

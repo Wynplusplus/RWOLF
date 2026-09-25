@@ -19,7 +19,7 @@
 //! SPDX-License-Identifier: MIT
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub const FILE_NAME: &str = "wolf3d-bevy.toml";
 
@@ -69,6 +69,53 @@ impl Config {
 
 static INSTANCE: OnceLock<Config> = OnceLock::new();
 
+/// A data directory chosen in the in-app folder picker during this session.
+/// It takes precedence over the config file so the user sees the effect
+/// immediately.
+static RUNTIME_DATA_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+/// The data directory selected at runtime, if any.
+pub fn runtime_data_dir() -> Option<PathBuf> {
+    RUNTIME_DATA_DIR
+        .get()
+        .and_then(|c| c.lock().ok().and_then(|g| g.clone()))
+}
+
+/// Remember (and persist) a data directory chosen by the user.
+pub fn set_data_dir(dir: PathBuf) {
+    let cell = RUNTIME_DATA_DIR.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = cell.lock() {
+        *g = Some(dir.clone());
+    }
+    if let Some(path) = writable_config_path() {
+        let text = format!(
+            "# Written by ARWOLF when a game folder was selected.\ndata_dir = \"{}\"\n",
+            dir.display()
+        );
+        if let Err(e) = std::fs::write(&path, text) {
+            eprintln!("warning: could not write config {}: {e}", path.display());
+        }
+    }
+}
+
+/// Where to persist a user-selected directory. On Android that is the
+/// app-specific external files folder (always writable); elsewhere the
+/// current directory.
+fn writable_config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        Some(PathBuf::from(format!(
+            "/sdcard/Android/data/{}/files/{}",
+            crate::data::ANDROID_PACKAGE,
+            FILE_NAME
+        )))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Some(PathBuf::from(FILE_NAME))
+    }
+}
+
 /// The process-wide config, loaded and cached on first use.
 pub fn get() -> &'static Config {
     INSTANCE.get_or_init(load)
@@ -104,6 +151,15 @@ fn candidate_paths() -> Vec<PathBuf> {
     }
     if let Some(dir) = config_home() {
         paths.push(dir.join("wolf3d-bevy").join("config.toml"));
+    }
+    #[cfg(target_os = "android")]
+    {
+        // The file the folder picker writes on Android.
+        paths.push(PathBuf::from(format!(
+            "/sdcard/Android/data/{}/files/{}",
+            crate::data::ANDROID_PACKAGE,
+            FILE_NAME
+        )));
     }
     paths
 }

@@ -11,6 +11,111 @@ use crate::render::framebuffer::{Framebuffer, STATUS_H, VIEW_H, VIEW_W};
 pub const EPISODES: usize = 6;
 pub const EPISODE_MAPS: usize = 10;
 
+/// Axis-aligned rectangle in framebuffer pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Rect {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x as f32
+            && y >= self.y as f32
+            && x < (self.x + self.w) as f32
+            && y < (self.y + self.h) as f32
+    }
+}
+
+/// What a tap on the level-select overlay hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuHit {
+    Episode(usize),
+    Map(usize),
+    Start,
+    Files,
+    Back,
+}
+
+pub fn episode_rect(index: usize) -> Rect {
+    let (cw, ch, gap) = (30, 18, 6);
+    let total = EPISODES as i32 * cw + (EPISODES as i32 - 1) * gap;
+    let x0 = (VIEW_W as i32 - total) / 2;
+    Rect {
+        x: x0 + index as i32 * (cw + gap),
+        y: 42,
+        w: cw,
+        h: ch,
+    }
+}
+
+pub fn map_rect(index: usize) -> Rect {
+    let (cw, ch, gap, cols) = (40, 22, 6, 5);
+    let total = cols as i32 * cw + (cols as i32 - 1) * gap;
+    let x0 = (VIEW_W as i32 - total) / 2;
+    let col = (index % cols) as i32;
+    let row = (index / cols) as i32;
+    Rect {
+        x: x0 + col * (cw + gap),
+        y: 84 + row * (ch + gap),
+        w: cw,
+        h: ch,
+    }
+}
+
+pub fn start_rect() -> Rect {
+    Rect {
+        x: 8,
+        y: 166,
+        w: 96,
+        h: 22,
+    }
+}
+
+pub fn files_rect() -> Rect {
+    Rect {
+        x: 112,
+        y: 166,
+        w: 96,
+        h: 22,
+    }
+}
+
+pub fn back_rect() -> Rect {
+    Rect {
+        x: 216,
+        y: 166,
+        w: 96,
+        h: 22,
+    }
+}
+
+/// Hit-test a framebuffer position against the level-select overlay.
+pub fn menu_hit(x: f32, y: f32) -> Option<MenuHit> {
+    for e in 0..EPISODES {
+        if episode_rect(e).contains(x, y) {
+            return Some(MenuHit::Episode(e));
+        }
+    }
+    for m in 0..EPISODE_MAPS {
+        if map_rect(m).contains(x, y) {
+            return Some(MenuHit::Map(m));
+        }
+    }
+    if start_rect().contains(x, y) {
+        return Some(MenuHit::Start);
+    }
+    if files_rect().contains(x, y) {
+        return Some(MenuHit::Files);
+    }
+    if back_rect().contains(x, y) {
+        return Some(MenuHit::Back);
+    }
+    None
+}
+
 pub fn draw_status_bar(fb: &mut Framebuffer, vga: &VgaData, hud: &Hud) {
     let top = (VIEW_H - STATUS_H) as i32;
     if let Some(bar) = vga.pic(pic::STATUS_BAR) {
@@ -131,29 +236,25 @@ pub fn draw_level_select(fb: &mut Framebuffer, vga: &VgaData, episode: usize, ma
 
     // Episode row.
     draw_centered(fb, font, "EPISODE", 30, 0x0f);
-    let (cw, ch, gap) = (30, 18, 6);
-    let total = EPISODES as i32 * cw + (EPISODES as i32 - 1) * gap;
-    let x0 = (VIEW_W as i32 - total) / 2;
     for e in 0..EPISODES {
-        let x = x0 + e as i32 * (cw + gap);
-        draw_cell(fb, font, &(e + 1).to_string(), x, 42, cw, ch, e == episode);
+        let r = episode_rect(e);
+        draw_cell(fb, font, &(e + 1).to_string(), r.x, r.y, r.w, r.h, e == episode);
     }
 
     // Floor grid, five columns over two rows.
     draw_centered(fb, font, "FLOOR", 72, 0x0f);
-    let (cw, ch, gap, cols) = (40, 22, 6, 5);
-    let total = cols as i32 * cw + (cols as i32 - 1) * gap;
-    let x0 = (VIEW_W as i32 - total) / 2;
     for m in 0..EPISODE_MAPS {
-        let col = m % cols;
-        let row = m / cols;
-        let x = x0 + col as i32 * (cw + gap);
-        let y = 84 + row as i32 * (ch + gap);
-        draw_cell(fb, font, &(m + 1).to_string(), x, y, cw, ch, m == map);
+        let r = map_rect(m);
+        draw_cell(fb, font, &(m + 1).to_string(), r.x, r.y, r.w, r.h, m == map);
     }
 
     let summary = format!("EPISODE {} - FLOOR {}", episode + 1, map + 1);
-    draw_centered(fb, font, &summary, 152, 0x0e);
-    draw_centered(fb, font, "ARROWS OR WASD: SELECT", 170, 0x0f);
-    draw_centered(fb, font, "ENTER: PLAY    ESC: BACK", 182, 0x0f);
+    draw_centered(fb, font, &summary, 148, 0x0e);
+
+    let start = start_rect();
+    draw_cell(fb, font, "START", start.x, start.y, start.w, start.h, true);
+    let files = files_rect();
+    draw_cell(fb, font, "FILES", files.x, files.y, files.w, files.h, false);
+    let back = back_rect();
+    draw_cell(fb, font, "BACK", back.x, back.y, back.w, back.h, false);
 }

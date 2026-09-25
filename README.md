@@ -31,8 +31,11 @@ There is no warranty.
 
 ## Game data
 
-RWOLF does not include any game data. Point it at your own WL6 files by copying
-`wolf3d-bevy.toml.example` to `wolf3d-bevy.toml` and editing `data_dir`:
+RWOLF does not include any game data. If no data is found, it opens an in-app
+**folder picker** — navigate to the folder that contains `VSWAP.WL6` and press
+**USE THIS FOLDER** (the choice is saved). You can also point it at your files
+by copying `wolf3d-bevy.toml.example` to `wolf3d-bevy.toml` and editing
+`data_dir`:
 
 ```toml
 data_dir = "/path/to/WOLF3D"
@@ -78,6 +81,7 @@ See [`flatpak/README.md`](flatpak/README.md) for details.
 | Use / open door | `Space` |
 | Weapons | `1` `2` `3` `4` |
 | Level-select menu | `Esc` |
+| Game-folder picker | `F` (or the `FILES` button in the menu) |
 
 ## License
 

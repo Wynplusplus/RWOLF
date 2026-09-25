@@ -7,21 +7,25 @@ use std::sync::Arc;
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings};
 use bevy::camera::ScalingMode;
-use bevy::ecs::schedule::common_conditions::resource_exists;
+use bevy::ecs::schedule::common_conditions::{not, resource_exists};
 use bevy::image::ImageSampler;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{CursorGrabMode, CursorOptions, WindowResolution};
+#[cfg(target_os = "android")]
+use bevy::window::{MonitorSelection, WindowMode};
 
 use crate::data::{GameData, audio::SAMPLE_RATE};
 use crate::game::actor::Difficulty;
+use crate::game::browser::{Browser, inside, layout};
 use crate::game::world::{InputState, PlayState, World};
 use crate::render::framebuffer::{Framebuffer, VIEW_H, VIEW_W};
 use crate::render::hud::{
-    EPISODE_MAPS, EPISODES, draw_level_select, draw_status_bar,
+    EPISODE_MAPS, EPISODES, MenuHit, draw_level_select, draw_status_bar, menu_hit,
 };
+use crate::touch::{TouchControls, draw_controls, read_touch};
 use crate::render::raycast::{
     Camera, collect_sprites, render_sprites, render_walls, render_weapon,
 };
@@ -84,6 +88,10 @@ pub fn run() -> AppExit {
             primary_window: Some(Window {
                 title: "Wolfenstein 3D (Bevy reimplementation)".into(),
                 resolution: WindowResolution::new((VIEW_W * SCALE) as u32, (VIEW_H * SCALE) as u32),
+                // Phones get the whole screen; there is no window chrome and
+                // the touch overlay assumes it can use the full surface.
+                #[cfg(target_os = "android")]
+                mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                 ..default()
             }),
             ..default()
@@ -92,22 +100,46 @@ pub fn run() -> AppExit {
         .init_resource::<MouseCaptured>()
         .init_resource::<ScreenshotState>()
         .init_resource::<LevelMenu>()
+        .init_resource::<TouchControls>()
+        .init_resource::<InputRes>()
+        .init_resource::<Browser>()
         .add_systems(Startup, (setup, capture_cursor))
         .add_systems(
             Update,
             (
                 read_input,
-                handle_level_menu,
-                update_world.run_if(game_active),
-                render_world,
-                play_sounds.run_if(game_active),
-                handle_transitions.run_if(game_active),
+                read_touch,
+                apply_touch,
+                browse_input,
+                handle_level_menu.run_if(resource_exists::<DataRes>),
+                update_world.run_if(game_running),
+                play_sounds.run_if(game_running),
+                handle_transitions.run_if(game_running),
+                load_selected_dir,
+                render_browser.run_if(browser_open),
+                render_world
+                    .run_if(resource_exists::<DataRes>)
+                    .run_if(not(browser_open)),
                 maybe_screenshot,
             )
-                .chain()
-                .run_if(resource_exists::<DataRes>),
+                .chain(),
         )
         .run()
+}
+
+/// True while the folder picker is on screen.
+fn browser_open(browser: Res<Browser>) -> bool {
+    browser.open
+}
+
+/// True while the game should be simulated: data is loaded and no overlay is
+/// open.
+fn game_running(
+    menu: Res<LevelMenu>,
+    browser: Res<Browser>,
+    data: Option<Res<DataRes>>,
+) -> bool {
+    data.is_some() && !menu.open && !browser.open
 }
 
 /// Dev helper: when `WOLF3D_SCREENSHOT` is set, save a PNG of the window after
@@ -132,74 +164,27 @@ fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut audio_sources: ResMut<Assets<AudioSource>>,
-    mut exits: MessageWriter<AppExit>,
+    mut browser: ResMut<Browser>,
 ) {
     if let Some(src) = &crate::config::get().source {
         info!("Using config {}", src.display());
     }
-    let Some(dir) = crate::data::find_data_dir() else {
-        error!(
-            "Could not find Wolfenstein 3D data. Set `data_dir` in wolf3d-bevy.toml \
-             (see wolf3d-bevy.toml.example), set WOLF3D_DATA_DIR, or place the WL6 \
-             files in ./data"
-        );
-        // Exit with an error instead of leaving an empty window on screen.
-        exits.write(AppExit::error());
-        return;
-    };
-    let data = match GameData::load(&dir) {
-        Ok(d) => d,
-        Err(e) => {
-            error!("Failed to load game data from {}: {e}", dir.display());
-            exits.write(AppExit::error());
-            return;
-        }
-    };
-    info!("Loaded Wolfenstein 3D data from {}", dir.display());
+    // On Android this creates the directory the user pushes their data into.
+    crate::data::prepare_storage();
 
-    // Sound bank: wrap each PCM chunk in a WAV container.
-    let mut handles = Vec::with_capacity(data.audio.count());
-    for i in 0..data.audio.count() {
-        let samples = data.audio.sound_i16(i);
-        let wav = wav_from_i16(&samples, SAMPLE_RATE);
-        handles.push(audio_sources.add(AudioSource {
-            bytes: Arc::from(wav.into_boxed_slice()),
-        }));
-    }
-
-    let episode = start_episode();
-    let map = start_map();
-    let difficulty = start_difficulty();
-    info!(
-        "Starting episode {} map {} (difficulty {:?})",
-        episode + 1,
-        map + 1,
-        difficulty
-    );
-    let world =
-        World::new(&data, episode, map, difficulty).expect("requested map should exist");
-
+    // The framebuffer, camera and sprite always exist so a diagnostic screen
+    // can be drawn before (or instead of) the game.
     let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
     fb.clear(0);
     let rgba = vec![0u8; VIEW_W * VIEW_H * 4];
     let image = images.add(make_image(&rgba));
     let image_handle = image.clone();
-
-    commands.insert_resource(DataRes(data));
-    commands.insert_resource(WorldRes(world));
-    commands.insert_resource(LevelMenu {
-        open: false,
-        episode,
-        map,
-    });
-    commands.insert_resource(InputRes::default());
     commands.insert_resource(Screen {
         image,
         fb,
         rgba,
         zbuf: [f32::INFINITY; VIEW_W],
     });
-    commands.insert_resource(SoundBank { handles });
 
     // 2D camera sized so the whole 320x200 framebuffer is always visible.
     commands.spawn((
@@ -212,7 +197,6 @@ fn setup(
             ..OrthographicProjection::default_2d()
         }),
     ));
-
     commands.spawn((
         Sprite {
             image: image_handle,
@@ -221,6 +205,82 @@ fn setup(
         },
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
+
+    // Try to start the game; otherwise open the folder picker.
+    if let Some(dir) = crate::data::find_data_dir() {
+        match GameData::load(&dir) {
+            Ok(data) => {
+                info!("Loaded Wolfenstein 3D data from {}", dir.display());
+                let episode = start_episode();
+                let map = start_map();
+                let difficulty = start_difficulty();
+                info!(
+                    "Starting episode {} map {} (difficulty {:?})",
+                    episode + 1,
+                    map + 1,
+                    difficulty
+                );
+                install_game(
+                    &mut commands,
+                    &mut audio_sources,
+                    data,
+                    episode,
+                    map,
+                    difficulty,
+                );
+                return;
+            }
+            Err(e) => {
+                error!("Failed to load game data from {}: {e}", dir.display());
+                browser.open_at(dir);
+                browser.status = format!("FAILED TO LOAD: {e}");
+                return;
+            }
+        }
+    }
+
+    error!(
+        "Could not find Wolfenstein 3D data. Pick your WL6 folder in the app, \
+         set WOLF3D_DATA_DIR, or set `data_dir` in wolf3d-bevy.toml."
+    );
+    // On Android, ask for storage access up front so the picker can read
+    // shared storage such as Download.
+    if !crate::android::granted() {
+        crate::android::request();
+        browser.access_requested = true;
+    }
+    browser.open_default();
+    browser.status = "NO GAME DATA - PICK YOUR WOLF3D FOLDER".to_string();
+}
+
+/// Build the sound bank, create the world and install the game resources.
+fn install_game(
+    commands: &mut Commands,
+    audio_sources: &mut Assets<AudioSource>,
+    data: GameData,
+    episode: usize,
+    map: usize,
+    difficulty: Difficulty,
+) {
+    // Sound bank: wrap each PCM chunk in a WAV container.
+    let mut handles = Vec::with_capacity(data.audio.count());
+    for i in 0..data.audio.count() {
+        let samples = data.audio.sound_i16(i);
+        let wav = wav_from_i16(&samples, SAMPLE_RATE);
+        handles.push(audio_sources.add(AudioSource {
+            bytes: Arc::from(wav.into_boxed_slice()),
+        }));
+    }
+
+    let world = World::new(&data, episode, map, difficulty).expect("requested map should exist");
+    commands.insert_resource(DataRes(data));
+    commands.insert_resource(WorldRes(world));
+    commands.insert_resource(SoundBank { handles });
+    commands.insert_resource(LevelMenu {
+        open: false,
+        episode,
+        map,
+    });
 }
 
 fn make_image(rgba: &[u8]) -> Image {
@@ -338,9 +398,190 @@ fn read_input(
     }
 }
 
-/// True while the level-select overlay is closed (the game is running).
-fn game_active(menu: Res<LevelMenu>) -> bool {
-    !menu.open
+/// Merge touch input into this frame's [`InputState`]. Keyboard/mouse input
+/// already gathered by [`read_input`] is preserved.
+fn apply_touch(
+    menu: Res<LevelMenu>,
+    browser: Res<Browser>,
+    controls: Res<TouchControls>,
+    mut input: ResMut<InputRes>,
+) {
+    if !controls.enabled || menu.open || browser.open {
+        return;
+    }
+    let i = &mut input.0;
+    i.forward += controls.movement.y;
+    i.turn += controls.movement.x;
+    i.mouse_dx += controls.look_dx;
+    i.fire |= controls.fire;
+    i.fire_pressed |= controls.fire_pressed;
+    i.use_pressed |= controls.use_pressed;
+    i.run |= controls.run;
+    if i.next_weapon.is_none() {
+        i.next_weapon = controls.weapon;
+    }
+}
+
+/// Navigate the game-folder picker. Runs every frame but only acts while it is
+/// open. Taps come from the touch overlay; the keyboard works on desktop.
+fn browse_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    controls: Res<TouchControls>,
+    time: Res<Time>,
+    data: Option<Res<DataRes>>,
+    mut refresh_timer: Local<f32>,
+    mut browser: ResMut<Browser>,
+) {
+    if !browser.open {
+        return;
+    }
+
+    // Storage permission: ask once when a folder could not be read, then
+    // re-check periodically so the picker refreshes after the user returns
+    // from the Android settings page.
+    if browser.access_error {
+        if !browser.access_requested {
+            browser.access_requested = true;
+            if !crate::android::granted() {
+                crate::android::request();
+            }
+        }
+        *refresh_timer -= time.delta_secs();
+        if *refresh_timer <= 0.0 {
+            *refresh_timer = 1.0;
+            if crate::android::granted() {
+                browser.refresh();
+            }
+        }
+    }
+
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        browser.select_delta(1);
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        browser.select_delta(-1);
+    }
+    if keys.just_pressed(KeyCode::PageDown) {
+        browser.scroll_delta(layout::VISIBLE_ROWS as i32);
+    }
+    if keys.just_pressed(KeyCode::PageUp) {
+        browser.scroll_delta(-(layout::VISIBLE_ROWS as i32));
+    }
+    if keys.just_pressed(KeyCode::Enter) {
+        browser.enter_selected();
+    }
+    if keys.just_pressed(KeyCode::Backspace) {
+        browser.go_up();
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        browser.next_root();
+    }
+    if keys.just_pressed(KeyCode::KeyU) {
+        confirm_browser(&mut browser);
+    }
+    if keys.just_pressed(KeyCode::Escape) && data.is_some() {
+        browser.open = false;
+    }
+
+    if let Some(p) = controls.tap {
+        let (x, y) = (p.x, p.y);
+        if browser.access_error && inside(layout::grant_rect(), x, y) {
+            if crate::android::granted() {
+                browser.refresh();
+            } else {
+                crate::android::request();
+            }
+        } else if inside(layout::close_rect(), x, y) {
+            if data.is_some() {
+                browser.open = false;
+            }
+        } else if inside(layout::up_rect(), x, y) {
+            browser.go_up();
+        } else if inside(layout::roots_rect(), x, y) {
+            browser.next_root();
+        } else if inside(layout::use_rect(), x, y) {
+            confirm_browser(&mut browser);
+        } else if inside(layout::scroll_up_rect(), x, y) {
+            browser.scroll_delta(-1);
+        } else if inside(layout::scroll_down_rect(), x, y) {
+            browser.scroll_delta(1);
+        } else {
+            for i in 0..layout::VISIBLE_ROWS {
+                if inside(layout::row_rect(i), x, y) {
+                    let index = browser.scroll + i;
+                    if index < browser.entries.len() {
+                        browser.selected = index;
+                        browser.enter_selected();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn confirm_browser(browser: &mut Browser) {
+    if let Some(dir) = browser.confirm() {
+        crate::config::set_data_dir(dir.clone());
+        browser.pending = Some(dir);
+    }
+}
+
+/// Load the folder the user confirmed in the picker.
+fn load_selected_dir(
+    mut commands: Commands,
+    mut audio_sources: ResMut<Assets<AudioSource>>,
+    mut browser: ResMut<Browser>,
+) {
+    let Some(dir) = browser.pending.take() else {
+        return;
+    };
+    match GameData::load(&dir) {
+        Ok(data) => {
+            info!("Loaded Wolfenstein 3D data from {}", dir.display());
+            install_game(
+                &mut commands,
+                &mut audio_sources,
+                data,
+                start_episode(),
+                start_map(),
+                start_difficulty(),
+            );
+            browser.open = false;
+        }
+        Err(e) => {
+            error!("Failed to load game data from {}: {e}", dir.display());
+            browser.status = format!("FAILED TO LOAD: {e}");
+        }
+    }
+}
+
+/// Draw the folder picker over the framebuffer.
+fn render_browser(
+    browser: Res<Browser>,
+    data: Option<Res<DataRes>>,
+    mut screen: ResMut<Screen>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if !browser.open {
+        return;
+    }
+    let screen = &mut *screen;
+    crate::render::browser_ui::draw(&mut screen.fb, &browser, data.is_some());
+    screen.fb.to_rgba(&mut screen.rgba);
+    upload_screen(screen, &mut images);
+}
+
+/// Upload the framebuffer's RGBA data to the sprite's image.
+/// Callers must have refreshed `screen.rgba` with [`Framebuffer::to_rgba`].
+fn upload_screen(screen: &mut Screen, images: &mut Assets<Image>) {
+    if let Some(mut img) = images.get_mut(&screen.image) {
+        if let Some(data) = img.data.as_mut() {
+            data.copy_from_slice(&screen.rgba);
+        } else {
+            img.data = Some(screen.rgba.clone());
+        }
+    }
 }
 
 fn set_cursor_capture(
@@ -365,15 +606,26 @@ fn set_cursor_capture(
 /// it with `Enter`/`Space`. Number keys `1`-`6` jump to an episode directly.
 fn handle_level_menu(
     keys: Res<ButtonInput<KeyCode>>,
+    controls: Res<TouchControls>,
     mut menu: ResMut<LevelMenu>,
     mut world: ResMut<WorldRes>,
     mut input: ResMut<InputRes>,
     data: Res<DataRes>,
+    mut browser: ResMut<Browser>,
     mut captured: ResMut<MouseCaptured>,
     mut cursor: Query<&mut CursorOptions, With<Window>>,
 ) {
-    // Escape toggles the menu and releases/recaptures the mouse.
-    if keys.just_pressed(KeyCode::Escape) {
+    // `F` (or the FILES button) opens the game-folder picker.
+    if keys.just_pressed(KeyCode::KeyF) {
+        menu.open = false;
+        browser.open_default();
+        browser.status = "CHOOSE A FOLDER CONTAINING VSWAP.WL6".to_string();
+        set_cursor_capture(&mut cursor, &mut captured, false);
+        return;
+    }
+
+    // Escape (or the on-screen MENU button) toggles the overlay.
+    if keys.just_pressed(KeyCode::Escape) || controls.menu_pressed {
         menu.open = !menu.open;
         if menu.open {
             // Start from the level currently being played.
@@ -419,9 +671,34 @@ fn handle_level_menu(
         }
     }
 
+    // Touch: tap a cell to select it, tap START to play, FILES to pick a data
+    // folder, or BACK to close.
+    let mut touch_start = false;
+    if let Some(p) = controls.tap {
+        match menu_hit(p.x, p.y) {
+            Some(MenuHit::Episode(e)) => menu.episode = e,
+            Some(MenuHit::Map(m)) => menu.map = m,
+            Some(MenuHit::Start) => touch_start = true,
+            Some(MenuHit::Files) => {
+                menu.open = false;
+                browser.open_default();
+                browser.status = "CHOOSE A FOLDER CONTAINING VSWAP.WL6".to_string();
+                set_cursor_capture(&mut cursor, &mut captured, false);
+                return;
+            }
+            Some(MenuHit::Back) => {
+                menu.open = false;
+                set_cursor_capture(&mut cursor, &mut captured, true);
+                return;
+            }
+            None => {}
+        }
+    }
+
     if keys.just_pressed(KeyCode::Enter)
         || keys.just_pressed(KeyCode::NumpadEnter)
         || keys.just_pressed(KeyCode::Space)
+        || touch_start
     {
         let difficulty = world.0.difficulty;
         if let Some(new_world) = World::new(&data.0, menu.episode, menu.map, difficulty) {
@@ -447,6 +724,7 @@ fn render_world(
     data: Res<DataRes>,
     world: Res<WorldRes>,
     menu: Res<LevelMenu>,
+    controls: Res<TouchControls>,
     mut screen: ResMut<Screen>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -487,34 +765,29 @@ fn render_world(
         PlayState::Playing => {}
     }
 
-    // Damage flash: tint the 3D view red.
-    if world.player.damage_flash > 0.0 {
-        let strength = (world.player.damage_flash / 0.25).clamp(0.0, 1.0);
-        if strength > 0.35 {
-            for y in 0..crate::render::framebuffer::VIEW_3D_H {
-                for x in 0..VIEW_W {
-                    let v = screen.fb.get(x, y);
-                    if v != 0 {
-                        screen.fb.put(x as i32, y as i32, 0x2c);
-                    }
-                }
-            }
-        }
-    }
-
-    // The level-select overlay covers the frozen world while it is open.
+    // The level-select overlay covers the frozen world while it is open;
+    // otherwise the touch controls are drawn over the 3D view.
     if menu.open {
         draw_level_select(&mut screen.fb, &data.0.vga, menu.episode, menu.map);
+    } else {
+        draw_controls(&mut screen.fb, &data.0.vga, &controls);
     }
 
+    // Damage flash: a full-screen red tint that decays, mirroring the
+    // original's palette flash.
     screen.fb.to_rgba(&mut screen.rgba);
-    if let Some(mut img) = images.get_mut(&screen.image) {
-        if let Some(data) = img.data.as_mut() {
-            data.copy_from_slice(&screen.rgba);
-        } else {
-            img.data = Some(screen.rgba.clone());
+    if world.player.damage_flash > 0.0 {
+        let strength = (world.player.damage_flash / 0.25).clamp(0.0, 1.0) * 0.55;
+        for px in screen.rgba.chunks_exact_mut(4) {
+            let r = px[0] as f32;
+            let g = px[1] as f32;
+            let b = px[2] as f32;
+            px[0] = (r + (255.0 - r) * strength) as u8;
+            px[1] = (g * (1.0 - strength)) as u8;
+            px[2] = (b * (1.0 - strength)) as u8;
         }
     }
+    upload_screen(screen, &mut images);
 }
 
 fn play_sounds(
@@ -620,6 +893,8 @@ mod tests {
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());
         app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<crate::touch::TouchControls>();
+        app.init_resource::<crate::game::browser::Browser>();
         app.add_systems(Update, handle_level_menu);
 
         // Right, right, down -> episode 2 (index 1), floor 3 (index 2).
@@ -662,6 +937,8 @@ mod tests {
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());
         app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<crate::touch::TouchControls>();
+        app.init_resource::<crate::game::browser::Browser>();
         app.add_systems(Update, handle_level_menu);
 
         tap(&mut app, KeyCode::ArrowLeft);
