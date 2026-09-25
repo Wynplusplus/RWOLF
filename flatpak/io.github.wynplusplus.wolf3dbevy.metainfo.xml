@@ -37,6 +37,15 @@
   </content_rating>
 
   <releases>
+    <release version="0.1.1" date="2026-09-25">
+      <description>
+        <p>
+          Fix the player's weapon floating in the middle of the view: it is now
+          scaled to the full view height and rests on the bottom edge, matching
+          the original.
+        </p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-25"/>
   </releases>
 </component>

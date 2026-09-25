@@ -367,15 +367,19 @@ pub fn render_sprites(
     }
 }
 
-/// Draw the player's weapon, scaled the way the original's `SimpleScaleShape`
-/// does: to half the view height, centred vertically.
+/// Draw the player's weapon the way the original does. `DrawPlayerWeapon`
+/// calls `SimpleScaleShape(viewwidth/2, spr, viewheight+1)`; that height is
+/// halved to index the compiled-scaler table, which resolves to a scale of
+/// exactly `viewheight` anchored at the top of the viewport. The weapon art
+/// (which lives in the lower part of the 64x64 shape) therefore rests on the
+/// bottom edge of the view instead of floating mid-screen.
 pub fn render_weapon(fb: &mut Framebuffer, vswap: &VSwap, sprite: u16) {
     let Some(spr) = vswap.sprite(sprite as usize) else {
         return;
     };
-    let size = VIEW_3D_H as f32 / 2.0;
+    let size = VIEW_3D_H as f32;
     let left = VIEW_W as f32 / 2.0 - size / 2.0;
-    let top = HORIZON - size / 2.0;
+    let top = 0.0f32;
     let x_start = left.floor().max(0.0) as i32;
     let x_end = (left + size).ceil().min(VIEW_W as f32) as i32;
     let y_start = top.max(0.0) as i32;
