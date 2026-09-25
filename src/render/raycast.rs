@@ -241,16 +241,12 @@ fn cast(
             });
         }
 
-        // Solid wall. `0x40` marks a tile next to a door.
+        // Solid wall. `0x40` marks a tile next to a door. Such a tile can be a
+        // plain floor tile at the end of a wall; the original still draws the
+        // door frame on its face towards the door, so the door-side test has to
+        // run before the `base == 0` bail-out.
         let base = (tile & 0x3F) as usize;
-        if base == 0 {
-            continue;
-        }
-        let mut texture = if side == 0 {
-            (base - 1) * 2 + 1
-        } else {
-            (base - 1) * 2
-        };
+        let mut door_side = None;
         if tile & 0x40 != 0 {
             let (nx, ny) = if side == 0 {
                 (map_x - step_x, map_y)
@@ -260,9 +256,22 @@ fn cast(
             if nx >= 0 && ny >= 0 && (nx as usize) < level.width && (ny as usize) < level.height
                 && level.tile(nx as usize, ny as usize) & 0x80 != 0
             {
-                texture = door_base + if side == 0 { DOOR_SIDE_V } else { DOOR_SIDE_H };
+                door_side = Some(door_base + if side == 0 { DOOR_SIDE_V } else { DOOR_SIDE_H });
             }
         }
+        let texture = match door_side {
+            Some(t) => t,
+            None => {
+                if base == 0 {
+                    continue;
+                }
+                if side == 0 {
+                    (base - 1) * 2 + 1
+                } else {
+                    (base - 1) * 2
+                }
+            }
+        };
         let wall_x = if side == 0 {
             cam.y + perp * rdy
         } else {
@@ -425,4 +434,72 @@ pub fn collect_sprites(level: &Level, actors: &[Actor], view_angle: f32) -> Vec<
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::game::actor::Difficulty;
+    use crate::game::world::World;
+
+    /// Every door's inner frame face should select a door-side texture.
+    #[test]
+    fn door_side_faces_use_side_textures() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+        let sprite_start = data.vswap.sprite_start as usize;
+        let door_base = sprite_start.saturating_sub(8);
+        let mut bad = 0usize;
+        let mut total = 0usize;
+        for mi in 0..60 {
+            let Some(_map) = data.maps.get(mi) else { continue };
+            let mut world = World::new(&data, mi / 10, mi % 10, Difficulty::Normal).unwrap();
+            for d in world.level.doors.iter_mut() {
+                d.position = 1.0;
+            }
+            let doors = world.level.doors.clone();
+            for (i, d) in doors.iter().enumerate() {
+                let (cx, cy) = (d.x as f32 + 0.5, d.y as f32 + 0.5);
+                let (rays, want) = if d.vertical {
+                    (
+                        [(0.0f32, -1.0f32), (0.0, 1.0)],
+                        door_base + DOOR_SIDE_H,
+                    )
+                } else {
+                    ([(1.0f32, 0.0f32), (-1.0, 0.0)], door_base + DOOR_SIDE_V)
+                };
+                for (rdx, rdy) in rays {
+                    total += 1;
+                    let cam = Camera {
+                        x: cx,
+                        y: cy,
+                        angle: 0.0,
+                    };
+                    match cast(&world.level, cam, rdx, rdy, door_base, sprite_start) {
+                        Some(h) if h.texture == want => {}
+                        Some(h) => {
+                            bad += 1;
+                            if bad <= 20 {
+                                eprintln!(
+                                    "map {mi} door {i} vert={} tex={} want={want}",
+                                    d.vertical, h.texture
+                                );
+                            }
+                        }
+                        None => {
+                            bad += 1;
+                            if bad <= 20 {
+                                eprintln!("map {mi} door {i} vert={} NO HIT want={want}", d.vertical);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("checked {total} door faces, {bad} wrong");
+        assert_eq!(bad, 0, "{bad}/{total} door frame faces wrong");
+    }
 }

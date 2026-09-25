@@ -182,7 +182,9 @@ impl Level {
             let d = (t & 0x7F) as usize;
             return self.doors.get(d).map(|d| d.position < 0.9).unwrap_or(true);
         }
-        t != 0 || self.blockers[y * self.width + x]
+        // The `0x40` door-side flag is a rendering hint: a flagged floor tile
+        // still has no collision (the original's `actorat` is 0 there).
+        (t & 0x3F) != 0 || self.blockers[y * self.width + x]
     }
 
     /// Tile value used for texture selection (strips door-side flags).

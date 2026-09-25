@@ -37,6 +37,14 @@
   </content_rating>
 
   <releases>
+    <release version="0.1.2" date="2026-09-25">
+      <description>
+        <p>
+          Fix doors: the inner door frame no longer disappears on one side, and
+          a closing door no longer traps the player.
+        </p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-09-25">
       <description>
         <p>

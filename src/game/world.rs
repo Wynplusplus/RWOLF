@@ -350,7 +350,16 @@ impl World {
     }
 
     fn update_doors(&mut self, dt: f32) {
-        for door in self.level.doors.iter_mut() {
+        // A closing door must not trap the player or an actor. The original
+        // checks this in `CloseDoor` and re-checks in `DoorClosing`, reopening
+        // whenever something is in the doorway.
+        let occupied: Vec<bool> = self
+            .level
+            .doors
+            .iter()
+            .map(|d| self.door_occupied(d.x, d.y))
+            .collect();
+        for (i, door) in self.level.doors.iter_mut().enumerate() {
             match door.state {
                 DoorState::Opening => {
                     door.position += dt / 0.9;
@@ -362,20 +371,36 @@ impl World {
                 }
                 DoorState::Open => {
                     door.timer -= dt;
-                    if door.timer <= 0.0 {
+                    if door.timer <= 0.0 && !occupied[i] {
                         door.state = DoorState::Closing;
                     }
                 }
                 DoorState::Closing => {
-                    door.position -= dt / 0.9;
-                    if door.position <= 0.0 {
-                        door.position = 0.0;
-                        door.state = DoorState::Closed;
+                    if occupied[i] {
+                        // Something moved into the doorway; reopen instead of
+                        // crushing it.
+                        door.state = DoorState::Opening;
+                    } else {
+                        door.position -= dt / 0.9;
+                        if door.position <= 0.0 {
+                            door.position = 0.0;
+                            door.state = DoorState::Closed;
+                        }
                     }
                 }
                 DoorState::Closed => {}
             }
         }
+    }
+
+    /// Whether the player or a live actor overlaps the given door tile.
+    fn door_occupied(&self, x: usize, y: usize) -> bool {
+        if circle_overlaps_tile(self.player.x, self.player.y, PLAYER_RADIUS, x, y) {
+            return true;
+        }
+        self.actors
+            .iter()
+            .any(|a| a.is_alive() && circle_overlaps_tile(a.x, a.y, PLAYER_RADIUS, x, y))
     }
 
     fn update_actors(&mut self, dt: f32) {
@@ -835,6 +860,14 @@ fn death_sound(kind: ActorKind) -> usize {
     }
 }
 
+/// Whether a circle centred at `(x, y)` with radius `r` overlaps tile
+/// `(tx, ty)`.
+fn circle_overlaps_tile(x: f32, y: f32, r: f32, tx: usize, ty: usize) -> bool {
+    let cx = x.clamp(tx as f32, tx as f32 + 1.0);
+    let cy = y.clamp(ty as f32, ty as f32 + 1.0);
+    (x - cx).powi(2) + (y - cy).powi(2) < r * r
+}
+
 /// Circle-vs-grid collision test.
 pub fn collides(level: &Level, x: f32, y: f32, r: f32) -> bool {
     let min_x = (x - r).floor() as i32;
@@ -853,9 +886,7 @@ pub fn collides(level: &Level, x: f32, y: f32, r: f32) -> bool {
             if !level.is_solid(txu, tyu) {
                 continue;
             }
-            let cx = x.clamp(tx as f32, tx as f32 + 1.0);
-            let cy = y.clamp(ty as f32, ty as f32 + 1.0);
-            if (x - cx).powi(2) + (y - cy).powi(2) < r * r {
+            if circle_overlaps_tile(x, y, r, txu, tyu) {
                 return true;
             }
         }
@@ -930,6 +961,45 @@ mod tests {
                 w.player.y
             );
         }
+    }
+
+    #[test]
+    fn doors_do_not_close_on_the_player() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        // Stand in the first door tile with the door open and its timer expired.
+        let (dx, dy) = (w.level.doors[0].x, w.level.doors[0].y);
+        w.player.x = dx as f32 + 0.5;
+        w.player.y = dy as f32 + 0.5;
+        w.level.doors[0].position = 1.0;
+        w.level.doors[0].state = DoorState::Open;
+        w.level.doors[0].timer = 0.0;
+        w.update(1.0 / 60.0, &InputState::default());
+        assert_eq!(
+            w.level.doors[0].state,
+            DoorState::Open,
+            "an open door started closing on the player"
+        );
+
+        // A door already closing must reopen rather than crush the player.
+        w.level.doors[0].state = DoorState::Closing;
+        w.level.doors[0].position = 0.5;
+        w.update(1.0 / 60.0, &InputState::default());
+        assert_eq!(
+            w.level.doors[0].state,
+            DoorState::Opening,
+            "a closing door did not reopen for the player"
+        );
+
+        // The player must still be able to walk out of the doorway.
+        let (px, py) = (w.player.x, w.player.y);
+        for _ in 0..30 {
+            w.update(1.0 / 60.0, &input_forward(1.0));
+        }
+        assert!(
+            (w.player.x - px).abs() > 0.1 || (w.player.y - py).abs() > 0.1,
+            "player got stuck in the doorway"
+        );
     }
 
     #[test]
