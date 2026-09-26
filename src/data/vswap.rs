@@ -12,7 +12,7 @@
 //! ```
 //!
 //! * chunks `0 .. sprite_start` are 64x64 wall textures (4096 raw palette
-//!   indices, row-major);
+//!   indices, column-major: pixel `(x, y)` is at `y + x * 64`);
 //! * chunks `sprite_start .. sound_start` are 64x64 sprites (see
 //!   [`Sprite`]);
 //! * chunks from `sound_start` on are raw 8-bit unsigned PCM samples.
@@ -142,7 +142,8 @@ impl VSwap {
         Self::raw_chunk(&self.data, &self.offsets, &self.lengths, index)
     }
 
-    /// A wall texture (4096 bytes, row-major) by *wall number*.
+    /// A wall texture (4096 bytes, column-major: pixel `(x, y)` at
+    /// `y + x * 64`) by *wall number*.
     pub fn wall(&self, wall: usize) -> Option<&[u8]> {
         if wall >= self.sprite_start as usize {
             return None;

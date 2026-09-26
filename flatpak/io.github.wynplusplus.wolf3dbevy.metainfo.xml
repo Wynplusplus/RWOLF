@@ -37,6 +37,15 @@
   </content_rating>
 
   <releases>
+    <release version="1.0.2" date="2026-09-26">
+      <description>
+        <p>
+          Fix wall textures rendering rotated 90 degrees. VSWAP stores wall
+          textures column-major, but the renderer read them row-major, which
+          transposed every wall. Walls now render upright.
+        </p>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-09-26">
       <description>
         <p>

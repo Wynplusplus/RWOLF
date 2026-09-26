@@ -139,7 +139,13 @@ pub fn render_walls(
         for y in top..bottom {
             let tex_y = (((y as f32 - draw_start as f32) / span) * 64.0) as i32;
             let tex_y = tex_y.clamp(0, 63) as usize;
-            let color = tex[tex_y * 64 + tex_x];
+            // VSWAP wall textures are stored column-major: the original
+            // selects a column with `texture = (intercept>>4)&0xfc0` (i.e.
+            // `col*64`) and the scaler then walks `[si+0..63]` down that
+            // column (`BuildCompScale`). Indexing `tex_y*64 + tex_x` instead
+            // reads the transposed image, so every wall texture looks rotated
+            // 90 degrees.
+            let color = tex[tex_x * 64 + tex_y];
             fb.put(x as i32, y, color);
         }
     }
@@ -495,6 +501,7 @@ pub fn collect_sprites(level: &Level, actors: &[Actor], view_angle: f32) -> Vec<
 mod tests {
     use super::*;
     use crate::data::{GameData, Map};
+    use crate::render::framebuffer::VIEW_H;
     use crate::game::actor::Difficulty;
     use crate::game::level::build_level;
     use crate::game::world::World;
@@ -559,6 +566,74 @@ mod tests {
             hit.texture, DOOR_SIDE_V,
             "grazing ray drew the door panel over the door frame"
         );
+    }
+
+    /// Wall textures in VSWAP are stored column-major (the original selects a
+    /// column with `col*64` and its scaler walks `[si+0..63]` down it). If the
+    /// renderer indexes them row-major the art is transposed, which looks like
+    /// every wall texture is rotated 90 degrees.
+    #[test]
+    fn wall_texture_is_sampled_column_major() {
+        // A one-texture VSWAP whose byte at (x, y) holds the column index `x`.
+        const HEADER: usize = 6 + 4 + 2;
+        let mut data = vec![0u8; HEADER + 4096];
+        data[0..2].copy_from_slice(&1u16.to_le_bytes()); // chunk_count
+        data[2..4].copy_from_slice(&1u16.to_le_bytes()); // sprite_start
+        data[4..6].copy_from_slice(&1u16.to_le_bytes()); // sound_start
+        data[6..10].copy_from_slice(&(HEADER as u32).to_le_bytes()); // offset
+        data[10..12].copy_from_slice(&4096u16.to_le_bytes()); // length
+        for x in 0..64 {
+            for y in 0..64 {
+                data[HEADER + x * 64 + y] = x as u8;
+            }
+        }
+        let vswap = VSwap::from_bytes(data).expect("synthetic vswap");
+
+        // A horizontal wall (constant y) directly north of the camera. `side`
+        // is 1, so base 1 selects texture `(base-1)*2 == 0`.
+        let mut walls = vec![109u16; 8 * 8];
+        for x in 0..8 {
+            walls[2 * 8 + x] = 1;
+        }
+        let map = Map {
+            width: 8,
+            height: 8,
+            name: "tex".into(),
+            walls,
+            objects: vec![0; 64],
+        };
+        let level = build_level(&map, 0, 0);
+        let cam = Camera {
+            x: 4.0,
+            y: 4.5,
+            angle: std::f32::consts::FRAC_PI_2, // north
+        };
+        let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+        let mut zbuf = [f32::INFINITY; VIEW_W];
+        render_walls(&mut fb, &vswap, &level, cam, &mut zbuf);
+
+        // The centre column is straight ahead; its colour must be constant from
+        // top to bottom. A transposed read would vary with screen row instead.
+        let x = VIEW_W / 2;
+        let height = PROJ_V / zbuf[x];
+        let top = (HORIZON - height / 2.0).round() as i32 + 2;
+        let bottom = (HORIZON + height / 2.0).round() as i32 - 2;
+        assert!(bottom > top, "wall not visible; height {height}");
+        let expected = fb.get(x, top as usize);
+        for y in top..=bottom {
+            assert_eq!(
+                fb.get(x, y as usize),
+                expected,
+                "wall column varies vertically; texture is transposed"
+            );
+        }
+
+        // And adjacent columns must differ, so the texture really is sampled
+        // across the wall rather than being uniformly one value.
+        let left = fb.get(x - 60, top as usize);
+        let right = fb.get(x + 60, top as usize);
+        assert_ne!(left, expected, "texture does not vary across the wall");
+        assert_ne!(right, expected, "texture does not vary across the wall");
     }
 
     /// Every door's inner frame face should select a door-side texture.
