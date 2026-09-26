@@ -726,10 +726,10 @@ impl World {
             uy = self.level.height - 1;
         }
 
-        // Elevator switch.
-        if east_west
-            && self.level.wall_tile(ux, uy) == crate::game::level::ELEVATOR_TILE as u8
-        {
+        // Elevator switch. Compare the raw tilemap byte like the original's
+        // `doornum == ELEVATORTILE`: masking off the high bits would make door
+        // number 21 (`0x80 | 21`) look like the switch and end the level.
+        if east_west && self.level.tile(ux, uy) == crate::game::level::ELEVATOR_TILE as u8 {
             let secret = self.level.wall_tile(
                 self.player.x.floor() as usize,
                 self.player.y.floor() as usize,
@@ -999,6 +999,59 @@ mod tests {
         assert!(
             (w.player.x - px).abs() > 0.1 || (w.player.y - py).abs() > 0.1,
             "player got stuck in the doorway"
+        );
+    }
+
+    /// Using a door must open it, never trigger the elevator switch. Door
+    /// number 21 has tilemap byte `0x80 | 21`; masking off the high bits used
+    /// to make it look like elevator-switch tile 21 and end the level.
+    #[test]
+    fn using_a_door_never_completes_the_level() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        // E1M1's door at (36,57) is door number 21, directly behind the door
+        // the player starts facing.
+        let idx = w
+            .level
+            .doors
+            .iter()
+            .position(|d| d.x == 36 && d.y == 57)
+            .expect("door at 36,57");
+        assert_eq!(idx, 21, "door numbering changed; pick another door");
+        w.player.x = 35.5;
+        w.player.y = 57.5;
+        w.player.angle = 0.0; // face east, towards the door
+        w.use_action();
+        assert_eq!(
+            w.state,
+            PlayState::Playing,
+            "using a door completed the level"
+        );
+        assert_ne!(
+            w.level.doors[idx].state,
+            DoorState::Closed,
+            "the door did not open"
+        );
+    }
+
+    /// The elevator switch must still end the level after the door fix.
+    #[test]
+    fn elevator_switch_completes_the_level() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        assert_eq!(
+            w.level.tile(26, 47),
+            crate::game::level::ELEVATOR_TILE as u8,
+            "E1M1 elevator switch moved"
+        );
+        w.player.x = 25.5;
+        w.player.y = 47.5;
+        w.player.angle = 0.0; // face east, towards the switch
+        w.use_action();
+        assert_eq!(
+            w.state,
+            PlayState::LevelComplete,
+            "the elevator switch did not end the level"
         );
     }
 

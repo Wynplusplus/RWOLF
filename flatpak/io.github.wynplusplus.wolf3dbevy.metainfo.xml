@@ -37,6 +37,15 @@
   </content_rating>
 
   <releases>
+    <release version="0.1.4" date="2026-09-26">
+      <description>
+        <p>
+          Fix the level ending by itself: pressing USE on door number 21 was
+          mistaken for the elevator switch. The switch is now matched on the
+          raw tile, so doors only open.
+        </p>
+      </description>
+    </release>
     <release version="0.1.3" date="2026-09-26">
       <description>
         <p>
