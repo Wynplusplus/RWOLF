@@ -37,6 +37,16 @@
   </content_rating>
 
   <releases>
+    <release version="1.0.1" date="2026-09-26">
+      <description>
+        <p>
+          Fix enemy damage: shots used the full 32-bit random value, so a
+          single hit could kill the player instantly. Damage now uses the
+          original's 0-255 values, and the player's own weapon damage matches
+          the original as well.
+        </p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-09-26">
       <description>
         <p>

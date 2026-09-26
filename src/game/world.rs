@@ -440,14 +440,27 @@ impl World {
                 best = Some((i, dist));
             }
         }
-        if let Some((i, dist)) = best {
-            let mut damage = (self.player.rand() % 16) as i32;
-            if weapon == 0 {
-                damage = 15 + (self.player.rand() % 10) as i32;
-            } else if dist > 4.0 && (self.player.rand() % 12) as f32 / 12.0 * 12.0 < dist {
-                // Long-range miss chance.
+        if let Some((i, _)) = best {
+            // `KnifeAttack` does `US_RndT()>>4`; `GunAttack` scales with the
+            // tile distance and can miss at long range.
+            let ptx = self.player.x.floor() as i32;
+            let pty = self.player.y.floor() as i32;
+            let tile_dist = (self.actors[i].tile_x - ptx)
+                .abs()
+                .max((self.actors[i].tile_y - pty).abs());
+            let damage = if weapon == 0 {
+                ((self.player.rand() & 0xFF) >> 4) as i32
+            } else if tile_dist < 2 {
+                ((self.player.rand() & 0xFF) / 4) as i32
+            } else if tile_dist < 4 {
+                ((self.player.rand() & 0xFF) / 6) as i32
+            } else if (((self.player.rand() & 0xFF) / 12) as i32) < tile_dist {
+                // Long-range miss.
+                self.sounds.push(0); // HITWALLSND
                 return;
-            }
+            } else {
+                ((self.player.rand() & 0xFF) / 6) as i32
+            };
             self.damage_actor(i, damage);
             self.sounds.push(27); // HITENEMYSND
         } else {
@@ -1232,14 +1245,16 @@ impl World {
         } else {
             256 - dist * 16
         };
-        if ((self.player.rand() % 256) as i32) < hitchance {
-            let r = self.player.rand();
+        // `US_RndT()` is a byte (0..=255); masking keeps the damage in the
+        // original's range instead of shifting a full 32-bit value.
+        if ((self.player.rand() & 0xFF) as i32) < hitchance {
+            let r = (self.player.rand() & 0xFF) as i32;
             let damage = if dist < 2 {
-                (r >> 2) as i32
+                r >> 2
             } else if dist < 4 {
-                (r >> 3) as i32
+                r >> 3
             } else {
-                (r >> 4) as i32
+                r >> 4
             };
             self.last_damage_source = Some((ax, ay));
             return damage;
@@ -1253,8 +1268,8 @@ impl World {
         let a = &self.actors[i];
         let dx = (self.player.x - a.x).abs() - 1.0;
         let dy = (self.player.y - a.y).abs() - 1.0;
-        if dx <= MINACTOR_DIST && dy <= MINACTOR_DIST && (self.player.rand() % 256) < 180 {
-            return (self.player.rand() >> 4) as i32;
+        if dx <= MINACTOR_DIST && dy <= MINACTOR_DIST && (self.player.rand() & 0xFF) < 180 {
+            return ((self.player.rand() & 0xFF) >> 4) as i32;
         }
         0
     }
@@ -1882,6 +1897,40 @@ mod tests {
             DoorState::Closed,
             "the door did not open"
         );
+    }
+
+    /// Enemy shots must do bounded damage (the original's `US_RndT()>>n`),
+    /// never the huge value a full 32-bit shift would produce.
+    #[test]
+    fn enemy_shots_do_bounded_damage() {
+        let mut walls = vec![109u16; 16 * 16];
+        for i in 0..16 {
+            walls[i] = 1;
+            walls[15 * 16 + i] = 1;
+            walls[i * 16] = 1;
+            walls[i * 16 + 15] = 1;
+        }
+        let mut objects = vec![0u16; 16 * 16];
+        objects[8 * 16 + 8] = 108; // guard at (8, 8), facing east
+        objects[8 * 16 + 12] = 22; // player at (12, 8)
+        let map = Map {
+            width: 16,
+            height: 16,
+            name: "shots".into(),
+            walls,
+            objects,
+        };
+        let mut w = World::from_map(&map, 0, 0, Difficulty::Normal);
+        w.compute_areabyplayer();
+        let mut hits = 0;
+        for _ in 0..2000 {
+            let d = w.t_shoot(0);
+            assert!((0..=63).contains(&d), "enemy damage {d} out of range");
+            if d > 0 {
+                hits += 1;
+            }
+        }
+        assert!(hits > 0, "the guard never hit the player");
     }
 
     /// Ambush actors ignore noise and only wake when they see the player.
