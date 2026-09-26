@@ -12,6 +12,8 @@ pub const ELEVATOR_TILE: u16 = 21;
 pub const ALT_ELEVATOR_TILE: u16 = 107;
 /// Plane-1 marker for a pushable wall.
 pub const PUSHWALL_TILE: u16 = 98;
+/// Plane-1 marker for an ambush spawn (floor tile 106).
+pub const AMBUSHTILE: u16 = 106;
 /// Plane-1 marker for the level exit.
 pub const EXIT_TILE: u16 = 99;
 
@@ -236,6 +238,12 @@ pub struct Level {
     /// `true` where the raw floor tile is `ALT_ELEVATOR_TILE` (107), i.e. the
     /// player standing there reaches the secret floor when using the elevator.
     pub alt_elevator: Vec<bool>,
+    /// Floor area number per tile (`raw - AREATILE`), or `0xFF` for walls.
+    pub areas: Vec<u8>,
+    /// `true` where the raw floor tile is the ambush marker (106).
+    pub ambush: Vec<bool>,
+    /// Patrol-arrow direction (`dirtype`) per tile, or `-1` (plane-1 90..=97).
+    pub path_dirs: Vec<i8>,
     /// Number of pushwalls (the original's `secrettotal`).
     pub secret_total: usize,
     /// Number of treasure objects (the original's `treasuretotal`).
@@ -325,10 +333,13 @@ pub fn build_level(map: &Map, episode: usize, map_index: usize) -> Level {
     let mut blockers = vec![false; width * height];
     let mut objects = map.objects.clone();
 
-    // Solid walls and floors.
+    // Solid walls and floors. The ambush marker (106) is a floor tile that an
+    // actor stands on; the original clears it when the actor is spawned.
     for i in 0..width * height {
         let t = map.walls[i];
-        if t < AREA_TILE {
+        if t == AMBUSHTILE {
+            tilemap[i] = 0;
+        } else if t < AREA_TILE {
             tilemap[i] = t as u8;
         } else {
             tilemap[i] = 0;
@@ -434,6 +445,39 @@ pub fn build_level(map: &Map, episode: usize, map_index: usize) -> Level {
         .iter()
         .map(|&t| t == ALT_ELEVATOR_TILE)
         .collect();
+    // Area numbers come straight from the map's floor tiles, as in the
+    // original; the ambush marker is floor tile 106.
+    let mut areas: Vec<u8> = map
+        .walls
+        .iter()
+        .map(|&t| if t >= AREA_TILE { (t - AREA_TILE) as u8 } else { 0xFF })
+        .collect();
+    // An ambush tile borrows a neighbouring floor's area, as `SpawnStand` does.
+    for y in 0..height {
+        for x in 0..width {
+            if map.walls[y * width + x] == AMBUSHTILE {
+                let mut area = 0u8;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height {
+                        let a = areas[ny as usize * width + nx as usize];
+                        if a != 0xFF {
+                            area = a;
+                        }
+                    }
+                }
+                areas[y * width + x] = area;
+            }
+        }
+    }
+    let ambush: Vec<bool> = map.walls.iter().map(|&t| t == AMBUSHTILE).collect();
+    // Patrol arrows live in the object plane, values 90..=97.
+    let path_dirs: Vec<i8> = map
+        .objects
+        .iter()
+        .map(|&o| if (90..=97).contains(&o) { (o - 90) as i8 } else { -1 })
+        .collect();
     // The original counts pushwalls as secrets and treasure objects as treasure.
     let secret_total = pushwalls.len();
     let treasure_total = statics.iter().filter(|s| s.item.is_treasure()).count();
@@ -452,6 +496,9 @@ pub fn build_level(map: &Map, episode: usize, map_index: usize) -> Level {
         pushwalls,
         push_wall: None,
         alt_elevator,
+        areas,
+        ambush,
+        path_dirs,
         secret_total,
         treasure_total,
         floor_color: 0x19,

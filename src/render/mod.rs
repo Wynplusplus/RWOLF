@@ -185,6 +185,33 @@ mod tests {
         std::fs::write(std::env::temp_dir().join("wolf3d_touch.ppm"), ppm).unwrap();
     }
 
+    /// Dump the "Get Psyched!" and high-score screens for visual inspection.
+    #[test]
+    fn render_menu_screens() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+        let dump = |fb: &Framebuffer, name: &str| {
+            let mut ppm = format!("P6\n{} {}\n255\n", VIEW_W, VIEW_H).into_bytes();
+            for &idx in &fb.pixels {
+                ppm.extend_from_slice(&palette::to_rgb(idx));
+            }
+            std::fs::write(std::env::temp_dir().join(name), ppm).unwrap();
+        };
+        let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+        crate::render::hud::draw_get_psyched(&mut fb, &data.vga);
+        dump(&fb, "wolf3d_getpsyched.ppm");
+
+        let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+        let mut scores = crate::game::scores::HighScores::default();
+        scores.submit(12345, 0, 3);
+        scores.submit(9999, 1, 7);
+        scores.submit(500, 5, 0);
+        crate::render::hud::draw_scores(&mut fb, &data.vga, &scores);
+        dump(&fb, "wolf3d_scores.ppm");
+    }
+
     /// Render the end-of-floor intermission for visual inspection.
     #[test]
     fn render_intermission() {

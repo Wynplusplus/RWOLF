@@ -3,6 +3,7 @@
 //! SPDX-License-Identifier: MIT
 
 use crate::data::generated::*;
+use crate::game::level::Level;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActorKind {
@@ -29,6 +30,8 @@ pub enum ActorState {
     Idle,
     Chase,
     Shoot,
+    /// The dog's leap-and-bite (`s_dogjump*`).
+    Bite,
     Pain,
     Dying,
     Dead,
@@ -84,7 +87,8 @@ impl ActorKind {
         table[row][self.index()]
     }
 
-    fn index(self) -> usize {
+    /// Stable index used by save games and the hit-point table.
+    pub fn index(self) -> usize {
         match self {
             ActorKind::Guard => 0,
             ActorKind::Officer => 1,
@@ -105,14 +109,55 @@ impl ActorKind {
         }
     }
 
-    /// Movement speed in tiles per second.
-    pub fn speed(self) -> f32 {
+    /// Inverse of [`ActorKind::index`].
+    pub fn from_index(i: usize) -> ActorKind {
+        match i {
+            0 => ActorKind::Guard,
+            1 => ActorKind::Officer,
+            2 => ActorKind::Ss,
+            3 => ActorKind::Dog,
+            4 => ActorKind::Hans,
+            5 => ActorKind::Schabbs,
+            6 => ActorKind::FakeHitler,
+            7 => ActorKind::Hitler,
+            8 => ActorKind::Mutant,
+            9 => ActorKind::Blinky,
+            10 => ActorKind::Clyde,
+            11 => ActorKind::Pinky,
+            12 => ActorKind::Inky,
+            13 => ActorKind::Gretel,
+            14 => ActorKind::Gift,
+            _ => ActorKind::Fat,
+        }
+    }
+
+    /// Idle/patrol speed in tiles per second (`SPDPATROL`/`SPDDOG`, converted
+    /// from 16.16 tiles per tic at the original's ~70 tics per second).
+    pub fn base_speed(self) -> f32 {
         match self {
-            ActorKind::Dog => 2.2,
-            ActorKind::Officer | ActorKind::Mutant => 1.5,
-            ActorKind::Guard | ActorKind::Ss => 1.1,
-            ActorKind::Blinky | ActorKind::Clyde | ActorKind::Pinky | ActorKind::Inky => 1.4,
-            _ => 0.8,
+            ActorKind::Dog => 1.60, // SPDDOG = 1500
+            _ => 0.55,              // SPDPATROL = 512
+        }
+    }
+
+    /// `FirstSighting` multiplies the speed when the actor starts chasing.
+    pub fn chase_speed_mult(self) -> f32 {
+        match self {
+            ActorKind::Officer | ActorKind::Hitler => 5.0,
+            ActorKind::Ss => 4.0,
+            ActorKind::Guard
+            | ActorKind::Mutant
+            | ActorKind::Hans
+            | ActorKind::Gretel
+            | ActorKind::Gift
+            | ActorKind::Fat
+            | ActorKind::Schabbs
+            | ActorKind::FakeHitler => 3.0,
+            ActorKind::Dog
+            | ActorKind::Blinky
+            | ActorKind::Clyde
+            | ActorKind::Pinky
+            | ActorKind::Inky => 2.0,
         }
     }
 
@@ -205,6 +250,21 @@ impl ActorKind {
             ActorKind::Dog => 0,
             ActorKind::Gift | ActorKind::Schabbs | ActorKind::FakeHitler => 2,
             _ => 3,
+        }
+    }
+
+    /// The dog's bite animation (`s_dogjump1..3`).
+    pub fn bite_sprite(self) -> u16 {
+        match self {
+            ActorKind::Dog => SPR_DOG_JUMP1,
+            _ => 0,
+        }
+    }
+
+    pub fn bite_frames(self) -> u16 {
+        match self {
+            ActorKind::Dog => 3,
+            _ => 0,
         }
     }
 
@@ -306,11 +366,61 @@ impl ActorKind {
     }
 }
 
+/// The original's eight-way `dirtype` order, plus `NODIR`.
+pub const NODIR: i32 = -1;
+
+/// Unit step per `dirtype`, in tile coordinates (`y` grows south).
+pub const DIR_DELTA: [(i32, i32); 8] = [
+    (1, 0),   // east
+    (1, -1),  // northeast
+    (0, -1),  // north
+    (-1, -1), // northwest
+    (-1, 0),  // west
+    (-1, 1),  // southwest
+    (0, 1),   // south
+    (1, 1),   // southeast
+];
+
+/// `opposite[]` from the original.
+pub const OPPOSITE: [i32; 8] = [4, 5, 6, 7, 0, 1, 2, 3];
+
+/// `diagonal[][]` from the original: the diagonal direction between two
+/// cardinal directions, or `NODIR`.
+pub fn diagonal(d1: i32, d2: i32) -> i32 {
+    let (a, b) = (d1.min(d2), d1.max(d2));
+    match (a, b) {
+        (0, 2) => 1, // east + north -> northeast
+        (0, 6) => 7, // east + south -> southeast
+        (2, 4) => 3, // north + west -> northwest
+        (4, 6) => 5, // west + south -> southwest
+        _ => NODIR,
+    }
+}
+
+/// The facing angle of a `dirtype` (0 = east, 2 = north, ...).
+pub fn dir_angle8(dir: i32) -> f32 {
+    if dir < 0 {
+        0.0
+    } else {
+        (dir as f32) * std::f32::consts::TAU / 8.0
+    }
+}
+
 #[derive(Clone)]
 pub struct Actor {
     pub x: f32,
     pub y: f32,
-    /// Facing angle in radians (see the coordinate convention in `world`).
+    /// Destination tile the actor is walking to (`ob->tilex`/`tiley`).
+    pub tile_x: i32,
+    pub tile_y: i32,
+    /// Current movement direction (`dirtype`, or `NODIR`).
+    pub dir: i32,
+    /// Distance left to the destination tile in tiles, or a negative door
+    /// index when waiting for a door (`ob->distance`).
+    pub distance: f32,
+    /// Movement speed in tiles per second (`ob->speed`).
+    pub speed: f32,
+    /// Facing angle in radians for sprite selection.
     pub facing: f32,
     pub kind: ActorKind,
     pub state: ActorState,
@@ -320,10 +430,16 @@ pub struct Actor {
     /// Animation timer for walk/shoot cycles.
     pub anim: f32,
     pub walk_frame: usize,
-    /// Patrol actors wander until they spot the player.
+    /// Path actors follow the map's patrol arrows until they spot the player.
     pub patrol: bool,
     /// True once the actor has noticed the player.
     pub awake: bool,
+    /// `FL_AMBUSH`: the actor only wakes when it sees the player, not on sound.
+    pub ambush: bool,
+    /// `FL_FIRSTATTACK`: the first dodge may turn around.
+    pub first_attack: bool,
+    /// Floor area number the actor stands in (`ob->areanumber`).
+    pub area: usize,
     /// Set while an attack animation is resolving its shot.
     pub shot_fired: bool,
 }
@@ -357,6 +473,15 @@ impl Actor {
                     kind.stand_sprite()
                 } else {
                     base + f.min(kind.shoot_frames().saturating_sub(1))
+                }
+            }
+            ActorState::Bite => {
+                let base = kind.bite_sprite();
+                if base == 0 {
+                    kind.stand_sprite()
+                } else {
+                    let f = (self.timer / 0.14) as u16;
+                    base + f.min(kind.bite_frames().saturating_sub(1))
                 }
             }
             ActorState::Chase => {
@@ -393,12 +518,9 @@ pub fn rotation(facing: f32, view_angle: f32) -> u16 {
 /// Spawn the actors encoded in a map's object plane for `difficulty`.
 ///
 /// This mirrors `ScanInfoPlane`, including the difficulty gates.
-pub fn spawn_actors(
-    width: usize,
-    height: usize,
-    objects: &[u16],
-    difficulty: Difficulty,
-) -> Vec<Actor> {
+pub fn spawn_actors(level: &Level, objects: &[u16], difficulty: Difficulty) -> Vec<Actor> {
+    let width = level.width;
+    let height = level.height;
     let mut out = Vec::new();
     let allow = |d: Difficulty| -> (bool, bool) {
         // (medium-and-up allowed, hard-only allowed)
@@ -416,14 +538,22 @@ pub fn spawn_actors(
             if o == 0 {
                 continue;
             }
+            let idx = y * width + x;
+            let area = level.areas[idx] as usize;
+            let ambush = level.ambush[idx];
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            let mut spawn = |kind: ActorKind, dir: u16, patrol: bool| {
-                let facing = dir_angle(dir);
+            let mut spawn = |kind: ActorKind, map_dir: u16, patrol: bool| {
+                let dir = (map_dir as i32) * 2;
                 out.push(Actor {
                     x: px,
                     y: py,
-                    facing,
+                    tile_x: x as i32,
+                    tile_y: y as i32,
+                    dir,
+                    distance: 0.0,
+                    speed: kind.base_speed(),
+                    facing: dir_angle8(dir),
                     kind,
                     state: ActorState::Idle,
                     health: kind.health(difficulty),
@@ -432,6 +562,9 @@ pub fn spawn_actors(
                     walk_frame: 0,
                     patrol,
                     awake: false,
+                    ambush,
+                    first_attack: false,
+                    area,
                     shot_fired: false,
                 });
             };
@@ -493,21 +626,6 @@ pub fn spawn_actors(
     out
 }
 
-/// Map a `dir` (0 east, 1 north, 2 west, 3 south) to a facing angle.
-///
-/// Actor spawn directions in the map use the dirtype order of the original
-/// (`east, north, west, south`), because `SpawnStand`/`SpawnPatrol` use
-/// `new->dir = dir*2` to index the 8-way direction table.
-pub fn dir_angle(dir: u16) -> f32 {
-    use std::f32::consts::{FRAC_PI_2, PI};
-    match dir % 4 {
-        0 => 0.0,         // east
-        1 => FRAC_PI_2,   // north
-        2 => PI,          // west
-        _ => -FRAC_PI_2,  // south
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +634,11 @@ mod tests {
         Actor {
             x: 1.5,
             y: 1.5,
+            tile_x: 1,
+            tile_y: 1,
+            dir: 0,
+            distance: 0.0,
+            speed: kind.base_speed(),
             facing: 0.0,
             kind,
             state,
@@ -525,6 +648,9 @@ mod tests {
             walk_frame,
             patrol: false,
             awake: true,
+            ambush: false,
+            first_attack: false,
+            area: 0,
             shot_fired: false,
         }
     }

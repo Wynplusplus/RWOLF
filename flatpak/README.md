@@ -160,4 +160,4 @@ A few things to change before submitting:
    Wolfenstein 3D artwork, which is copyrighted and not covered by this
    project's MIT license — consider an original title/selection screen shot and
    make the situation clear in the description.
-4. Add a `<releases>` entry for each version (already present for `0.2.0`).
+4. Add a `<releases>` entry for each version (already present for `1.0.0`).

@@ -5,6 +5,7 @@
 use crate::data::VgaData;
 use crate::data::vga::{Font, pic};
 use crate::game::hud::Hud;
+use crate::game::scores::HighScores;
 use crate::render::framebuffer::{Framebuffer, STATUS_H, VIEW_H, VIEW_W};
 
 /// Number of episodes/maps in the registered (`WL6`) release.
@@ -36,6 +37,9 @@ pub enum MenuHit {
     Map(usize),
     Difficulty(usize),
     Start,
+    Save,
+    Load,
+    Scores,
     Files,
     Back,
 }
@@ -83,27 +87,54 @@ pub fn difficulty_rect(index: usize) -> Rect {
 
 pub fn start_rect() -> Rect {
     Rect {
-        x: 8,
+        x: 4,
         y: 164,
-        w: 96,
+        w: 50,
+        h: 22,
+    }
+}
+
+pub fn save_rect() -> Rect {
+    Rect {
+        x: 58,
+        y: 164,
+        w: 50,
+        h: 22,
+    }
+}
+
+pub fn load_rect() -> Rect {
+    Rect {
+        x: 112,
+        y: 164,
+        w: 50,
+        h: 22,
+    }
+}
+
+pub fn scores_rect() -> Rect {
+    Rect {
+        x: 166,
+        y: 164,
+        w: 50,
         h: 22,
     }
 }
 
 pub fn files_rect() -> Rect {
     Rect {
-        x: 112,
+        x: 220,
         y: 164,
-        w: 96,
+        w: 50,
         h: 22,
     }
 }
 
 pub fn back_rect() -> Rect {
     Rect {
-        x: 216,
+        x: 274,
         y: 164,
-        w: 96,
+        w: 42,
         h: 22,
     }
 }
@@ -127,6 +158,15 @@ pub fn menu_hit(x: f32, y: f32) -> Option<MenuHit> {
     }
     if start_rect().contains(x, y) {
         return Some(MenuHit::Start);
+    }
+    if save_rect().contains(x, y) {
+        return Some(MenuHit::Save);
+    }
+    if load_rect().contains(x, y) {
+        return Some(MenuHit::Load);
+    }
+    if scores_rect().contains(x, y) {
+        return Some(MenuHit::Scores);
     }
     if files_rect().contains(x, y) {
         return Some(MenuHit::Files);
@@ -332,10 +372,49 @@ pub fn draw_level_select(
     let summary = format!("EPISODE {} - FLOOR {}", episode + 1, map + 1);
     draw_centered(fb, font, &summary, 146, 0x0e);
 
-    let start = start_rect();
-    draw_cell(fb, font, "START", start.x, start.y, start.w, start.h, true);
-    let files = files_rect();
-    draw_cell(fb, font, "FILES", files.x, files.y, files.w, files.h, false);
-    let back = back_rect();
-    draw_cell(fb, font, "BACK", back.x, back.y, back.w, back.h, false);
+    for (r, label) in [
+        (start_rect(), "START"),
+        (save_rect(), "SAVE"),
+        (load_rect(), "LOAD"),
+        (scores_rect(), "SCORES"),
+        (files_rect(), "FILES"),
+        (back_rect(), "BACK"),
+    ] {
+        draw_cell(fb, font, label, r.x, r.y, r.w, r.h, label == "START");
+    }
+}
+
+/// The full-screen "Get Psyched!" intro picture shown on floor 1.
+pub fn draw_get_psyched(fb: &mut Framebuffer, vga: &VgaData) {
+    let Some(p) = vga.pic(pic::GET_PSYCHED) else {
+        return;
+    };
+    fb.fill_rect(0, 0, VIEW_W as i32, VIEW_H as i32, 0);
+    let x = (VIEW_W as i32 - p.width as i32) / 2;
+    let y = (VIEW_H as i32 - p.height as i32) / 2;
+    fb.blit(&p.pixels, p.width, p.height, x, y, None);
+}
+
+/// The high-score table, mirroring the original's score screen.
+pub fn draw_scores(fb: &mut Framebuffer, vga: &VgaData, scores: &HighScores) {
+    fb.clear(0x00);
+    let Some(font) = vga.font(0) else {
+        return;
+    };
+    draw_centered(fb, font, "HIGH SCORES", 8, 0x0e);
+    draw_centered(fb, font, "SCORE    FLOOR", 30, 0x0f);
+    if scores.entries.is_empty() {
+        draw_centered(fb, font, "NO SCORES YET", 80, 0x07);
+    }
+    for (i, e) in scores.entries.iter().enumerate() {
+        let line = format!(
+            "{:<2} {:>7}   E{}-{}",
+            i + 1,
+            e.score,
+            e.episode + 1,
+            e.map + 1
+        );
+        draw_centered(fb, font, &line, 46 + i as i32 * 12, 0x0f);
+    }
+    draw_centered(fb, font, "PRESS ANY KEY", 178, 0x0e);
 }

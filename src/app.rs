@@ -20,6 +20,8 @@ use bevy::window::{MonitorSelection, WindowMode};
 use crate::data::{GameData, audio::SAMPLE_RATE};
 use crate::game::actor::Difficulty;
 use crate::game::browser::{Browser, inside, layout};
+use crate::game::savegame;
+use crate::game::scores::HighScores;
 use crate::game::world::{InputState, PlayState, World};
 use crate::render::framebuffer::{Framebuffer, VIEW_H, VIEW_W};
 use crate::render::hud::{
@@ -55,6 +57,10 @@ struct SoundBank {
     handles: Vec<Handle<AudioSource>>,
 }
 
+/// Persistent high-score table.
+#[derive(Resource)]
+struct ScoresRes(HighScores);
+
 #[derive(Resource, Default)]
 struct MouseCaptured(bool);
 
@@ -67,6 +73,8 @@ struct LevelMenu {
     map: usize,
     /// Zero-based difficulty selection (see `Difficulty`).
     difficulty: usize,
+    /// The high-score table is covering the menu.
+    show_scores: bool,
 }
 
 impl Default for LevelMenu {
@@ -76,6 +84,7 @@ impl Default for LevelMenu {
             episode: 0,
             map: 0,
             difficulty: Difficulty::Normal.index(),
+            show_scores: false,
         }
     }
 }
@@ -173,6 +182,8 @@ fn setup(
     if let Some(src) = &crate::config::get().source {
         info!("Using config {}", src.display());
     }
+    let scores_path = crate::config::persist_path("wolf3d-bevy.scores");
+    commands.insert_resource(ScoresRes(HighScores::load(&scores_path)));
     // On Android this creates the directory the user pushes their data into.
     crate::data::prepare_storage();
 
@@ -285,6 +296,7 @@ fn install_game(
         episode,
         map,
         difficulty: difficulty.index(),
+        show_scores: false,
     });
 }
 
@@ -638,10 +650,35 @@ fn handle_level_menu(
             menu.map = world.0.map_index;
             menu.difficulty = world.0.difficulty.index();
         }
+        menu.show_scores = false;
         set_cursor_capture(&mut cursor, &mut captured, !menu.open);
         return;
     }
+
+    // Desktop shortcuts for the single save slot.
+    let save_path = crate::config::persist_path(savegame::FILE_NAME);
+    if keys.just_pressed(KeyCode::F5) {
+        if let Err(e) = savegame::save(&world.0, &save_path) {
+            eprintln!("warning: could not save {}: {e}", save_path.display());
+        }
+    }
+    if keys.just_pressed(KeyCode::F9) {
+        if let Some(w) = savegame::load(&data.0, &save_path) {
+            world.0 = w;
+            menu.open = false;
+            input.0 = InputState::default();
+            set_cursor_capture(&mut cursor, &mut captured, true);
+            return;
+        }
+    }
+
     if !menu.open {
+        return;
+    }
+    if menu.show_scores {
+        if keys.get_just_pressed().next().is_some() || controls.tap.is_some() {
+            menu.show_scores = false;
+        }
         return;
     }
 
@@ -690,6 +727,21 @@ fn handle_level_menu(
             Some(MenuHit::Map(m)) => menu.map = m,
             Some(MenuHit::Difficulty(d)) => menu.difficulty = d,
             Some(MenuHit::Start) => touch_start = true,
+            Some(MenuHit::Save) => {
+                if let Err(e) = savegame::save(&world.0, &save_path) {
+                    eprintln!("warning: could not save {}: {e}", save_path.display());
+                }
+            }
+            Some(MenuHit::Load) => {
+                if let Some(w) = savegame::load(&data.0, &save_path) {
+                    world.0 = w;
+                    menu.open = false;
+                    input.0 = InputState::default();
+                    set_cursor_capture(&mut cursor, &mut captured, true);
+                    return;
+                }
+            }
+            Some(MenuHit::Scores) => menu.show_scores = true,
             Some(MenuHit::Files) => {
                 menu.open = false;
                 browser.open_default();
@@ -735,6 +787,7 @@ fn render_world(
     data: Res<DataRes>,
     world: Res<WorldRes>,
     menu: Res<LevelMenu>,
+    scores: Res<ScoresRes>,
     controls: Res<TouchControls>,
     mut screen: ResMut<Screen>,
     mut images: ResMut<Assets<Image>>,
@@ -801,22 +854,32 @@ fn render_world(
     // The level-select overlay covers the frozen world while it is open;
     // otherwise the touch controls are drawn over the 3D view.
     if menu.open {
-        draw_level_select(
-            &mut screen.fb,
-            &data.0.vga,
-            menu.episode,
-            menu.map,
-            menu.difficulty,
-        );
+        if menu.show_scores {
+            crate::render::hud::draw_scores(&mut screen.fb, &data.0.vga, &scores.0);
+        } else {
+            draw_level_select(
+                &mut screen.fb,
+                &data.0.vga,
+                menu.episode,
+                menu.map,
+                menu.difficulty,
+            );
+        }
     } else {
         draw_controls(&mut screen.fb, &data.0.vga, &controls);
+    }
+
+    // The "Get Psyched!" intro covers the first moments of floor 1.
+    if world.intro_timer > 0.0 {
+        crate::render::hud::draw_get_psyched(&mut screen.fb, &data.0.vga);
     }
 
     // Damage flash: a full-screen red tint that decays, mirroring the
     // original's palette flash.
     screen.fb.to_rgba(&mut screen.rgba);
-    if world.player.damage_flash > 0.0 {
-        let strength = (world.player.damage_flash / 0.25).clamp(0.0, 1.0) * 0.55;
+    let strength = ((world.player.damage_flash / 0.25).clamp(0.0, 1.0) * 0.55)
+        .max(world.death_tint * 0.75);
+    if strength > 0.0 {
         for px in screen.rgba.chunks_exact_mut(4) {
             let r = px[0] as f32;
             let g = px[1] as f32;
@@ -858,6 +921,7 @@ fn handle_transitions(
     buttons: Res<ButtonInput<MouseButton>>,
     controls: Res<TouchControls>,
     mut menu: ResMut<LevelMenu>,
+    mut scores: ResMut<ScoresRes>,
     mut captured: ResMut<MouseCaptured>,
     mut cursor: Query<&mut CursorOptions, With<Window>>,
     mut input: ResMut<InputRes>,
@@ -873,11 +937,17 @@ fn handle_transitions(
         }
         PlayState::LevelComplete => {
             if world.0.transition_timer > 5.0 || (world.0.transition_timer > 0.6 && any_key) {
+                // Finishing the boss or secret floor ends the episode, so it is
+                // a run worth recording.
+                if world.0.map_index >= 8 {
+                    submit_score(&mut scores, &world.0);
+                }
                 world.0.next_level(&data.0);
             }
         }
         PlayState::GameOver => {
             if world.0.transition_timer > 3.5 {
+                submit_score(&mut scores, &world.0);
                 // Back to the level-select menu for a fresh run.
                 let (episode, map, difficulty) =
                     (world.0.episode, world.0.map_index, world.0.difficulty);
@@ -894,6 +964,16 @@ fn handle_transitions(
         }
         PlayState::Playing => {}
     }
+}
+
+/// Record a finished run in the high-score table and persist it.
+fn submit_score(scores: &mut ScoresRes, world: &World) {
+    scores
+        .0
+        .submit(world.player.score, world.episode, world.map_index);
+    scores
+        .0
+        .save(&crate::config::persist_path("wolf3d-bevy.scores"));
 }
 
 /// Wrap signed 16-bit mono PCM in a minimal WAV container so Bevy's audio
@@ -959,6 +1039,7 @@ mod tests {
             episode: 0,
             map: 0,
             difficulty: Difficulty::Normal.index(),
+            show_scores: false,
         });
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());
@@ -1004,6 +1085,7 @@ mod tests {
             episode: 0,
             map: 0,
             difficulty: Difficulty::Normal.index(),
+            show_scores: false,
         });
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());
@@ -1036,6 +1118,7 @@ mod tests {
             episode: 0,
             map: 0,
             difficulty: Difficulty::Normal.index(),
+            show_scores: false,
         });
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());

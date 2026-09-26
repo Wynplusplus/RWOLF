@@ -73,7 +73,12 @@ See [`flatpak/README.md`](flatpak/README.md) for details.
 ## Gameplay
 
 * Original enemies (guards, officers, SS, dogs, mutants, the episode bosses
-  and the Pac-Man ghosts), each with the original's health, speed and damage.
+  and the Pac-Man ghosts) driven by a port of the original's tile-based AI:
+  eight-way chase/dodge pathfinding, per-enemy chase speeds, probabilistic
+  shooting, the dog's leap-and-bite, and sight/sound that propagates through
+  floor areas. Ambush actors only wake when they see you.
+* A persistent high-score table, a single save slot (the menu's SAVE/LOAD or
+  `F5`/`F9`), the death cam, and the "Get Psyched!" intro.
 * Locked doors and keys, treasure and health pickups, weapons and ammo.
 * **Pushable secret walls** that slide two tiles, and **secret floors** reached
   from the secret elevator (with the original's `ElevatorBackTo` routing and
@@ -95,6 +100,8 @@ See [`flatpak/README.md`](flatpak/README.md) for details.
 | Weapons | `1` `2` `3` `4` |
 | Level-select menu | `Esc` |
 | Cycle difficulty (menu) | `D` |
+| Save / load game | `F5` / `F9` (or the menu's SAVE/LOAD) |
+| High scores (menu) | `SCORES` button |
 | Game-folder picker | `F` (or the `FILES` button in the menu) |
 
 ## License

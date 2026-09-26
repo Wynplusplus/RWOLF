@@ -37,6 +37,19 @@
   </content_rating>
 
   <releases>
+    <release version="1.0.0" date="2026-09-26">
+      <description>
+        <p>
+          First stable release. The enemy AI now follows the original's
+          tile-based chase/dodge, per-enemy speeds, probabilistic shooting and
+          dog bite; sight and noise propagate through floor areas, and ambush
+          actors only wake when they see the player. Adds a persistent
+          high-score table, a single save slot (menu or F5/F9), the death cam,
+          and the "Get Psyched!" intro. Also fixes ambush spawn tiles, which
+          were treated as solid walls.
+        </p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-26">
       <description>
         <p>

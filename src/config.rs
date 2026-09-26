@@ -116,6 +116,26 @@ fn writable_config_path() -> Option<PathBuf> {
     }
 }
 
+/// Directory for auxiliary persisted files (high scores, save games).
+pub fn persist_dir() -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        PathBuf::from(format!(
+            "/sdcard/Android/data/{}/files",
+            crate::data::ANDROID_PACKAGE
+        ))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        PathBuf::from(".")
+    }
+}
+
+/// Full path of an auxiliary persisted file, e.g. `wolf3d-bevy.scores`.
+pub fn persist_path(name: &str) -> PathBuf {
+    persist_dir().join(name)
+}
+
 /// The process-wide config, loaded and cached on first use.
 pub fn get() -> &'static Config {
     INSTANCE.get_or_init(load)
