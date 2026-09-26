@@ -206,14 +206,25 @@ fn cast(
                 }
                 let t = (map_x as f32 + 0.5 - cam.x) / rdx;
                 let y = cam.y + rdy * t;
-                (t, y - map_y as f32)
+                let frac = y - map_y as f32;
+                // The original rejects a hit when the ray leaves the tile
+                // before reaching the door plane (`cmp [yintercept+2],dx`).
+                // Otherwise the panel is drawn over the frame on one side.
+                if !(0.0..1.0).contains(&frac) {
+                    continue;
+                }
+                (t, frac)
             } else {
                 if rdy.abs() < 1e-9 {
                     continue;
                 }
                 let t = (map_y as f32 + 0.5 - cam.y) / rdy;
                 let xx = cam.x + rdx * t;
-                (t, xx - map_x as f32)
+                let frac = xx - map_x as f32;
+                if !(0.0..1.0).contains(&frac) {
+                    continue;
+                }
+                (t, frac)
             };
             if plane_t <= perp {
                 // Door plane is behind the entry point; treat as pass-through.
@@ -439,9 +450,72 @@ pub fn collect_sprites(level: &Level, actors: &[Actor], view_angle: f32) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::GameData;
+    use crate::data::{GameData, Map};
     use crate::game::actor::Difficulty;
+    use crate::game::level::build_level;
     use crate::game::world::World;
+
+    /// A ray that enters a door tile but leaves through its side before
+    /// reaching the door plane must hit the door frame, not the door panel.
+    ///
+    /// The original rejects such a hit (`cmp [yintercept+2],dx` / `continue`)
+    /// and keeps tracing; without that check the panel is drawn over the frame
+    /// on one side, so part of the frame disappears.
+    #[test]
+    fn grazing_ray_hits_door_frame_not_panel() {
+        let mut walls = vec![109u16; 8 * 8]; // floor
+        walls[2] = 1; // (2,0) north jamb
+        walls[2 * 8 + 2] = 1; // (2,2) south jamb
+        walls[8 + 2] = 90; // (2,1) vertical door
+        let map = Map {
+            width: 8,
+            height: 8,
+            name: "door".into(),
+            walls,
+            objects: vec![0; 64],
+        };
+        let level = build_level(&map, 0, 0);
+
+        // From the west, heading east and south: the ray crosses x = 2 at
+        // y = 1.8 and reaches the door plane x = 2.5 at y = 2.0, i.e. exactly
+        // one tile south of the door tile's row, so it exits the side first.
+        let cam = Camera {
+            x: 0.5,
+            y: 1.2,
+            angle: 0.0,
+        };
+        let hit = cast(&level, cam, 1.0, 0.4, 0, 8).expect("expected a hit");
+        assert_eq!(
+            hit.texture, DOOR_SIDE_H,
+            "grazing ray drew the door panel over the door frame"
+        );
+
+        // The same for a horizontal door at (1,2): from the north, heading
+        // south and east, the ray leaves the tile through its east side just
+        // as it reaches the door plane y = 2.5.
+        let mut walls = vec![109u16; 8 * 8];
+        walls[2 * 8] = 1; // (0,2) west jamb
+        walls[2 * 8 + 2] = 1; // (2,2) east jamb
+        walls[2 * 8 + 1] = 91; // (1,2) horizontal door
+        let map = Map {
+            width: 8,
+            height: 8,
+            name: "door".into(),
+            walls,
+            objects: vec![0; 64],
+        };
+        let level = build_level(&map, 0, 0);
+        let cam = Camera {
+            x: 1.2,
+            y: 0.5,
+            angle: 0.0,
+        };
+        let hit = cast(&level, cam, 0.4, 1.0, 0, 8).expect("expected a hit");
+        assert_eq!(
+            hit.texture, DOOR_SIDE_V,
+            "grazing ray drew the door panel over the door frame"
+        );
+    }
 
     /// Every door's inner frame face should select a door-side texture.
     #[test]
