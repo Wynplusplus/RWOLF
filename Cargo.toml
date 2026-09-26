@@ -1,6 +1,6 @@
 [package]
 name = "wolf3d-bevy"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "A clean-room reimplementation of Wolfenstein 3D in the Bevy game engine"

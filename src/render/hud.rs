@@ -34,32 +34,48 @@ impl Rect {
 pub enum MenuHit {
     Episode(usize),
     Map(usize),
+    Difficulty(usize),
     Start,
     Files,
     Back,
 }
 
+/// Difficulty labels shown on the level-select overlay.
+pub const DIFFICULTIES: [&str; 4] = ["BABY", "EASY", "NORMAL", "HARD"];
+
 pub fn episode_rect(index: usize) -> Rect {
-    let (cw, ch, gap) = (30, 18, 6);
+    let (cw, ch, gap) = (30, 16, 6);
     let total = EPISODES as i32 * cw + (EPISODES as i32 - 1) * gap;
     let x0 = (VIEW_W as i32 - total) / 2;
     Rect {
         x: x0 + index as i32 * (cw + gap),
-        y: 42,
+        y: 30,
         w: cw,
         h: ch,
     }
 }
 
 pub fn map_rect(index: usize) -> Rect {
-    let (cw, ch, gap, cols) = (40, 22, 6, 5);
+    let (cw, ch, gap, cols) = (40, 20, 6, 5);
     let total = cols as i32 * cw + (cols as i32 - 1) * gap;
     let x0 = (VIEW_W as i32 - total) / 2;
     let col = (index % cols) as i32;
     let row = (index / cols) as i32;
     Rect {
         x: x0 + col * (cw + gap),
-        y: 84 + row * (ch + gap),
+        y: 62 + row * (ch + gap),
+        w: cw,
+        h: ch,
+    }
+}
+
+pub fn difficulty_rect(index: usize) -> Rect {
+    let (cw, ch, gap) = (60, 16, 8);
+    let total = 4 * cw + 3 * gap;
+    let x0 = (VIEW_W as i32 - total) / 2;
+    Rect {
+        x: x0 + index as i32 * (cw + gap),
+        y: 122,
         w: cw,
         h: ch,
     }
@@ -68,7 +84,7 @@ pub fn map_rect(index: usize) -> Rect {
 pub fn start_rect() -> Rect {
     Rect {
         x: 8,
-        y: 166,
+        y: 164,
         w: 96,
         h: 22,
     }
@@ -77,7 +93,7 @@ pub fn start_rect() -> Rect {
 pub fn files_rect() -> Rect {
     Rect {
         x: 112,
-        y: 166,
+        y: 164,
         w: 96,
         h: 22,
     }
@@ -86,7 +102,7 @@ pub fn files_rect() -> Rect {
 pub fn back_rect() -> Rect {
     Rect {
         x: 216,
-        y: 166,
+        y: 164,
         w: 96,
         h: 22,
     }
@@ -102,6 +118,11 @@ pub fn menu_hit(x: f32, y: f32) -> Option<MenuHit> {
     for m in 0..EPISODE_MAPS {
         if map_rect(m).contains(x, y) {
             return Some(MenuHit::Map(m));
+        }
+    }
+    for d in 0..DIFFICULTIES.len() {
+        if difficulty_rect(d).contains(x, y) {
+            return Some(MenuHit::Difficulty(d));
         }
     }
     if start_rect().contains(x, y) {
@@ -180,6 +201,53 @@ fn latch_number(fb: &mut Framebuffer, vga: &VgaData, x: i32, y: i32, width: i32,
     }
 }
 
+/// Data shown on the end-of-floor intermission.
+pub struct Intermission {
+    pub secret_floor: bool,
+    pub time_secs: f32,
+    pub par_secs: f32,
+    pub kill: i32,
+    pub secret: i32,
+    pub treasure: i32,
+    pub bonus: i32,
+}
+
+/// The `LevelCompleted` intermission: ratios, time and bonus over a blank
+/// screen. The player continues with any key.
+pub fn draw_intermission(fb: &mut Framebuffer, vga: &VgaData, info: &Intermission) {
+    fb.fill_rect(0, 0, VIEW_W as i32, VIEW_H as i32, 0x00);
+    let Some(font) = vga.font(0) else {
+        return;
+    };
+    let title = if info.secret_floor {
+        "SECRET FLOOR COMPLETED"
+    } else {
+        "FLOOR COMPLETED"
+    };
+    draw_centered(fb, font, title, 10, 0x0e);
+
+    let mins = |s: f32| {
+        let t = s.max(0.0) as i32;
+        format!("{}:{:02}", t / 60, t % 60)
+    };
+    let time = format!("TIME     {}", mins(info.time_secs));
+    let par = if info.par_secs > 0.0 {
+        format!("PAR      {}", mins(info.par_secs))
+    } else {
+        "PAR      ??:??".to_string()
+    };
+    let kill = format!("KILL     {:>3}%", info.kill);
+    let secret = format!("SECRET   {:>3}%", info.secret);
+    let treasure = format!("TREASURE {:>3}%", info.treasure);
+    let bonus = format!("BONUS    {}", info.bonus);
+
+    let lines = [time, par, kill, secret, treasure, bonus];
+    for (i, line) in lines.iter().enumerate() {
+        draw_centered(fb, font, line, 36 + i as i32 * 16, 0x0f);
+    }
+    draw_centered(fb, font, "PRESS ANY KEY", 150, 0x0e);
+}
+
 /// Draw a centred message over the 3D view using the game's small font.
 pub fn draw_center_text(fb: &mut Framebuffer, vga: &VgaData, text: &str, y: i32, color: u8) {
     let Some(font) = vga.font(0) else {
@@ -226,30 +294,43 @@ fn draw_cell(
 
 /// The level-select overlay, opened with `Escape`. Fills the whole screen so it
 /// covers the frozen 3D view. `episode`/`map` are zero-based.
-pub fn draw_level_select(fb: &mut Framebuffer, vga: &VgaData, episode: usize, map: usize) {
+pub fn draw_level_select(
+    fb: &mut Framebuffer,
+    vga: &VgaData,
+    episode: usize,
+    map: usize,
+    difficulty: usize,
+) {
     fb.clear(0x00);
     let Some(font) = vga.font(0) else {
         return;
     };
 
-    draw_centered(fb, font, "SELECT LEVEL", 8, 0x0e);
+    draw_centered(fb, font, "SELECT LEVEL", 6, 0x0e);
 
     // Episode row.
-    draw_centered(fb, font, "EPISODE", 30, 0x0f);
+    draw_centered(fb, font, "EPISODE", 18, 0x0f);
     for e in 0..EPISODES {
         let r = episode_rect(e);
         draw_cell(fb, font, &(e + 1).to_string(), r.x, r.y, r.w, r.h, e == episode);
     }
 
     // Floor grid, five columns over two rows.
-    draw_centered(fb, font, "FLOOR", 72, 0x0f);
+    draw_centered(fb, font, "FLOOR", 50, 0x0f);
     for m in 0..EPISODE_MAPS {
         let r = map_rect(m);
         draw_cell(fb, font, &(m + 1).to_string(), r.x, r.y, r.w, r.h, m == map);
     }
 
+    // Difficulty row.
+    draw_centered(fb, font, "DIFFICULTY", 110, 0x0f);
+    for d in 0..DIFFICULTIES.len() {
+        let r = difficulty_rect(d);
+        draw_cell(fb, font, DIFFICULTIES[d], r.x, r.y, r.w, r.h, d == difficulty);
+    }
+
     let summary = format!("EPISODE {} - FLOOR {}", episode + 1, map + 1);
-    draw_centered(fb, font, &summary, 148, 0x0e);
+    draw_centered(fb, font, &summary, 146, 0x0e);
 
     let start = start_rect();
     draw_cell(fb, font, "START", start.x, start.y, start.w, start.h, true);

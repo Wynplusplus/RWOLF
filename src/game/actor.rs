@@ -42,6 +42,26 @@ pub enum Difficulty {
     Hard,
 }
 
+impl Difficulty {
+    pub fn index(self) -> usize {
+        match self {
+            Difficulty::Baby => 0,
+            Difficulty::Easy => 1,
+            Difficulty::Normal => 2,
+            Difficulty::Hard => 3,
+        }
+    }
+
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            0 => Difficulty::Baby,
+            1 => Difficulty::Easy,
+            2 => Difficulty::Normal,
+            _ => Difficulty::Hard,
+        }
+    }
+}
+
 impl ActorKind {
     pub fn health(self, d: Difficulty) -> i32 {
         // starthitpoints table from the original.
@@ -247,6 +267,43 @@ impl ActorKind {
     pub fn sprite_base(self) -> u16 {
         self.stand_sprite()
     }
+
+    /// Bosses gate the level's exit tile.
+    pub fn is_boss(self) -> bool {
+        matches!(
+            self,
+            ActorKind::Hans
+                | ActorKind::Gretel
+                | ActorKind::Gift
+                | ActorKind::Fat
+                | ActorKind::Schabbs
+                | ActorKind::FakeHitler
+                | ActorKind::Hitler
+        )
+    }
+
+    /// Whether the walk/stand sprites have eight view rotations. Bosses and the
+    /// Pac-Man ghosts use a single sprite per walk frame (`s_bosschase1` and
+    /// `s_blinkychase1` have `rotate = false`), so adding a rotation offset
+    /// would run into the next actor's sprites.
+    pub fn rotates(self) -> bool {
+        matches!(
+            self,
+            ActorKind::Guard
+                | ActorKind::Officer
+                | ActorKind::Ss
+                | ActorKind::Mutant
+                | ActorKind::Dog
+        )
+    }
+
+    /// Number of walk frames per animation cycle.
+    pub fn walk_frames(self) -> usize {
+        match self {
+            ActorKind::Blinky | ActorKind::Clyde | ActorKind::Pinky | ActorKind::Inky => 2,
+            _ => 4,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -304,9 +361,21 @@ impl Actor {
             }
             ActorState::Chase => {
                 let base = kind.walk_sprite();
-                base + (self.walk_frame as u16) * 8 + rotation(self.facing, view_angle)
+                let frame = self.walk_frame % kind.walk_frames();
+                if kind.rotates() {
+                    base + (frame as u16) * 8 + rotation(self.facing, view_angle)
+                } else {
+                    base + frame as u16
+                }
             }
-            ActorState::Idle => kind.stand_sprite() + rotation(self.facing, view_angle),
+            ActorState::Idle => {
+                let base = kind.stand_sprite();
+                if kind.rotates() {
+                    base + rotation(self.facing, view_angle)
+                } else {
+                    base
+                }
+            }
         };
         (s != 0).then_some(s)
     }
@@ -436,5 +505,93 @@ pub fn dir_angle(dir: u16) -> f32 {
         1 => FRAC_PI_2,   // north
         2 => PI,          // west
         _ => -FRAC_PI_2,  // south
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actor(kind: ActorKind, state: ActorState, walk_frame: usize) -> Actor {
+        Actor {
+            x: 1.5,
+            y: 1.5,
+            facing: 0.0,
+            kind,
+            state,
+            health: 100,
+            timer: 0.0,
+            anim: 0.0,
+            walk_frame,
+            patrol: false,
+            awake: true,
+            shot_fired: false,
+        }
+    }
+
+    /// Bosses use one sprite per walk frame, so their walk animation must stay
+    /// inside the four walk sprites instead of spilling into the shoot frames.
+    #[test]
+    fn boss_walk_sprites_stay_in_range() {
+        let bosses = [
+            (ActorKind::Hans, SPR_BOSS_W1),
+            (ActorKind::Gretel, SPR_GRETEL_W1),
+            (ActorKind::Gift, SPR_GIFT_W1),
+            (ActorKind::Fat, SPR_FAT_W1),
+            (ActorKind::Schabbs, SPR_SCHABB_W1),
+            (ActorKind::FakeHitler, SPR_FAKE_W1),
+            (ActorKind::Hitler, SPR_HITLER_W1),
+        ];
+        for (kind, base) in bosses {
+            assert!(!kind.rotates());
+            for frame in 0..4 {
+                let a = actor(kind, ActorState::Chase, frame);
+                let s = a.sprite(0.0).unwrap();
+                assert!(
+                    s >= base && s < base + 4,
+                    "{kind:?} frame {frame} sprite {s} outside {base}..{}",
+                    base + 4
+                );
+            }
+            // Idle must also stay on the first walk sprite.
+            assert_eq!(actor(kind, ActorState::Idle, 0).sprite(0.0).unwrap(), base);
+        }
+    }
+
+    /// The Pac-Man ghosts also have no rotations and only two walk frames.
+    #[test]
+    fn ghost_walk_sprites_stay_in_range() {
+        let ghosts = [
+            (ActorKind::Blinky, SPR_BLINKY_W1),
+            (ActorKind::Pinky, SPR_PINKY_W1),
+            (ActorKind::Clyde, SPR_CLYDE_W1),
+            (ActorKind::Inky, SPR_INKY_W1),
+        ];
+        for (kind, base) in ghosts {
+            assert!(!kind.rotates());
+            assert_eq!(kind.walk_frames(), 2);
+            for frame in 0..2 {
+                assert_eq!(
+                    actor(kind, ActorState::Chase, frame).sprite(0.0).unwrap(),
+                    base + frame as u16
+                );
+            }
+        }
+    }
+
+    /// Rotating actors keep eight sprites per walk frame.
+    #[test]
+    fn guard_walk_sprites_rotate() {
+        for frame in 0..4 {
+            let a = actor(ActorKind::Guard, ActorState::Chase, frame);
+            for (i, angle) in [0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0].into_iter().enumerate() {
+                let s = a.sprite(angle).unwrap();
+                let offset = s - SPR_GRD_W1_1;
+                assert!(
+                    offset >= frame as u16 * 8 && offset < (frame as u16 + 1) * 8,
+                    "guard frame {frame} angle {i} sprite {s} out of its 8 rotations"
+                );
+            }
+        }
     }
 }

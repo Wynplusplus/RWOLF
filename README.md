@@ -70,6 +70,19 @@ flatpak run io.github.wynplusplus.wolf3dbevy
 
 See [`flatpak/README.md`](flatpak/README.md) for details.
 
+## Gameplay
+
+* Original enemies (guards, officers, SS, dogs, mutants, the episode bosses
+  and the Pac-Man ghosts), each with the original's health, speed and damage.
+* Locked doors and keys, treasure and health pickups, weapons and ammo.
+* **Pushable secret walls** that slide two tiles, and **secret floors** reached
+  from the secret elevator (with the original's `ElevatorBackTo` routing and
+  15,000-point bonus).
+* An end-of-floor **intermission** with kill / secret / treasure ratios, time
+  and score bonus, a **game-over** screen, and lives.
+* Enemies open doors and alert nearby allies, and doors refuse to close on the
+  player.
+
 ## Controls
 
 | Action | Key |
@@ -78,9 +91,10 @@ See [`flatpak/README.md`](flatpak/README.md) for details.
 | Turn | mouse, or `←` `→` / `Q` `E` |
 | Run | `Shift` |
 | Fire | left mouse, or `Ctrl` |
-| Use / open door | `Space` |
+| Use / open door / push wall | `Space` |
 | Weapons | `1` `2` `3` `4` |
 | Level-select menu | `Esc` |
+| Cycle difficulty (menu) | `D` |
 | Game-folder picker | `F` (or the `FILES` button in the menu) |
 
 ## License

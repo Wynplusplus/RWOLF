@@ -37,6 +37,17 @@
   </content_rating>
 
   <releases>
+    <release version="0.2.0" date="2026-09-26">
+      <description>
+        <p>
+          Major gameplay update: pushable secret walls, secret floors with
+          routing, an end-of-floor intermission with kill/secret/treasure
+          ratios, in-game difficulty selection, and a game-over screen. Enemies
+          now open doors and alert each other, and bosses and ghosts render
+          with the correct sprites.
+        </p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-09-26">
       <description>
         <p>

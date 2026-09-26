@@ -68,6 +68,13 @@ impl Item {
     pub fn blocks(self) -> bool {
         self == Item::Block
     }
+    /// Treasure objects counted by the original's `treasuretotal`.
+    pub fn is_treasure(self) -> bool {
+        matches!(
+            self,
+            Item::Cross | Item::Chalice | Item::Bible | Item::Crown | Item::FullHeal
+        )
+    }
 }
 
 /// `statinfo[]` from the original: sprite and behaviour for each object value
@@ -133,6 +140,80 @@ pub struct Static {
     pub active: bool,
 }
 
+/// Direction a pushwall slides, in the map's `di_*` order (`east, north,
+/// west, south`) used by the original's `PushWall`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PushDir {
+    East,
+    North,
+    West,
+    South,
+}
+
+impl PushDir {
+    pub fn from_index(dir: usize) -> Self {
+        match dir % 4 {
+            0 => PushDir::East,
+            1 => PushDir::North,
+            2 => PushDir::West,
+            _ => PushDir::South,
+        }
+    }
+
+    /// Unit step in tile coordinates. `y` grows south.
+    pub fn delta(self) -> (i32, i32) {
+        match self {
+            PushDir::East => (1, 0),
+            PushDir::North => (0, -1),
+            PushDir::West => (-1, 0),
+            PushDir::South => (0, 1),
+        }
+    }
+
+    /// Whether the wall's plane is perpendicular to x (slides east/west).
+    pub fn vertical(self) -> bool {
+        matches!(self, PushDir::East | PushDir::West)
+    }
+}
+
+/// A wall that slides two tiles when the player pushes it (`PushWall` /
+/// `MovePWalls` in the original). It is removed from the tile map as it
+/// moves, opening a passage behind it.
+#[derive(Clone)]
+pub struct PushWall {
+    /// Tile the sliding plane currently occupies.
+    pub x: usize,
+    pub y: usize,
+    pub dir: PushDir,
+    /// Progress within the current tile, `0.0..1.0`.
+    pub pos: f32,
+    /// Whole tiles already traversed, `0..=2`.
+    pub moved: usize,
+    /// Wall texture base value (`tile & 0x3F`).
+    pub base: u8,
+    pub active: bool,
+}
+
+impl PushWall {
+    /// The coordinate of the sliding plane along its axis.
+    pub fn plane(&self) -> f32 {
+        let p = self.x as f32;
+        let q = self.y as f32;
+        match self.dir {
+            PushDir::East => p + self.pos,
+            PushDir::West => p + 1.0 - self.pos,
+            PushDir::South => q + self.pos,
+            PushDir::North => q + 1.0 - self.pos,
+        }
+    }
+
+    /// The tile coordinate on the axis parallel to the wall (the wall spans
+    /// one tile there).
+    pub fn perp_tile(&self) -> usize {
+        if self.dir.vertical() { self.y } else { self.x }
+    }
+}
+
 pub struct Level {
     pub width: usize,
     pub height: usize,
@@ -148,8 +229,17 @@ pub struct Level {
     pub statics: Vec<Static>,
     pub player_start: (f32, f32, f32),
     pub exit_tiles: Vec<(usize, usize)>,
+    /// Tiles marked with the pushable-wall object (98).
     pub pushwalls: Vec<(usize, usize)>,
-    pub secret_floor: bool,
+    /// The single wall currently sliding, if any.
+    pub push_wall: Option<PushWall>,
+    /// `true` where the raw floor tile is `ALT_ELEVATOR_TILE` (107), i.e. the
+    /// player standing there reaches the secret floor when using the elevator.
+    pub alt_elevator: Vec<bool>,
+    /// Number of pushwalls (the original's `secrettotal`).
+    pub secret_total: usize,
+    /// Number of treasure objects (the original's `treasuretotal`).
+    pub treasure_total: usize,
     pub floor_color: u8,
     pub ceiling_color: u8,
     pub episode: usize,
@@ -167,8 +257,29 @@ impl Level {
 
     #[inline]
     pub fn is_door(&self, x: usize, y: usize) -> Option<usize> {
+        if self.push_wall_at(x, y).is_some() {
+            return None;
+        }
         let t = self.tile(x, y);
         (t & 0x80 != 0).then_some((t & 0x7F) as usize)
+    }
+
+    /// The active pushwall, if its sliding tile is `(x, y)`.
+    #[inline]
+    pub fn push_wall_at(&self, x: usize, y: usize) -> Option<&PushWall> {
+        match &self.push_wall {
+            Some(pw) if pw.active && pw.x == x && pw.y == y => Some(pw),
+            _ => None,
+        }
+    }
+
+    /// Whether the elevator on this map leads to the secret floor from `(x, y)`.
+    #[inline]
+    pub fn is_alt_elevator(&self, x: usize, y: usize) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        self.alt_elevator[y * self.width + x]
     }
 
     /// Whether a wall (solid tile or closed door) blocks movement here.
@@ -177,6 +288,10 @@ impl Level {
             return true;
         }
         let t = self.tilemap[y * self.width + x];
+        if t & 0xC0 == 0xC0 {
+            // An active pushwall is always solid while it slides.
+            return true;
+        }
         if t & 0x80 != 0 {
             // Door: solid until mostly open.
             let d = (t & 0x7F) as usize;
@@ -312,7 +427,16 @@ pub fn build_level(map: &Map, episode: usize, map_index: usize) -> Level {
     }
 
     let ceiling = CEILING_COLORS[(episode * 10 + map_index).min(CEILING_COLORS.len() - 1)];
-    let secret_floor = false;
+
+    // Raw floor tile 107 marks the secret-elevator floor.
+    let alt_elevator: Vec<bool> = map
+        .walls
+        .iter()
+        .map(|&t| t == ALT_ELEVATOR_TILE)
+        .collect();
+    // The original counts pushwalls as secrets and treasure objects as treasure.
+    let secret_total = pushwalls.len();
+    let treasure_total = statics.iter().filter(|s| s.item.is_treasure()).count();
 
     Level {
         width,
@@ -326,7 +450,10 @@ pub fn build_level(map: &Map, episode: usize, map_index: usize) -> Level {
         player_start,
         exit_tiles,
         pushwalls,
-        secret_floor,
+        push_wall: None,
+        alt_elevator,
+        secret_total,
+        treasure_total,
         floor_color: 0x19,
         ceiling_color: ceiling,
         episode,

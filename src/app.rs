@@ -23,7 +23,8 @@ use crate::game::browser::{Browser, inside, layout};
 use crate::game::world::{InputState, PlayState, World};
 use crate::render::framebuffer::{Framebuffer, VIEW_H, VIEW_W};
 use crate::render::hud::{
-    EPISODE_MAPS, EPISODES, MenuHit, draw_level_select, draw_status_bar, menu_hit,
+    EPISODE_MAPS, EPISODES, Intermission, MenuHit, draw_intermission, draw_level_select,
+    draw_status_bar, menu_hit,
 };
 use crate::touch::{TouchControls, draw_controls, read_touch};
 use crate::render::raycast::{
@@ -64,6 +65,8 @@ struct LevelMenu {
     /// Zero-based episode/map selection.
     episode: usize,
     map: usize,
+    /// Zero-based difficulty selection (see `Difficulty`).
+    difficulty: usize,
 }
 
 impl Default for LevelMenu {
@@ -72,6 +75,7 @@ impl Default for LevelMenu {
             open: false,
             episode: 0,
             map: 0,
+            difficulty: Difficulty::Normal.index(),
         }
     }
 }
@@ -280,6 +284,7 @@ fn install_game(
         open: false,
         episode,
         map,
+        difficulty: difficulty.index(),
     });
 }
 
@@ -631,6 +636,7 @@ fn handle_level_menu(
             // Start from the level currently being played.
             menu.episode = world.0.episode;
             menu.map = world.0.map_index;
+            menu.difficulty = world.0.difficulty.index();
         }
         set_cursor_capture(&mut cursor, &mut captured, !menu.open);
         return;
@@ -656,6 +662,10 @@ fn handle_level_menu(
     if down {
         menu.episode = (menu.episode + 1) % EPISODES;
     }
+    // `D` cycles the difficulty.
+    if keys.just_pressed(KeyCode::KeyD) {
+        menu.difficulty = (menu.difficulty + 1) % 4;
+    }
 
     const EPISODE_KEYS: [KeyCode; EPISODES] = [
         KeyCode::Digit1,
@@ -678,6 +688,7 @@ fn handle_level_menu(
         match menu_hit(p.x, p.y) {
             Some(MenuHit::Episode(e)) => menu.episode = e,
             Some(MenuHit::Map(m)) => menu.map = m,
+            Some(MenuHit::Difficulty(d)) => menu.difficulty = d,
             Some(MenuHit::Start) => touch_start = true,
             Some(MenuHit::Files) => {
                 menu.open = false;
@@ -700,7 +711,7 @@ fn handle_level_menu(
         || keys.just_pressed(KeyCode::Space)
         || touch_start
     {
-        let difficulty = world.0.difficulty;
+        let difficulty = Difficulty::from_index(menu.difficulty);
         if let Some(new_world) = World::new(&data.0, menu.episode, menu.map, difficulty) {
             world.0 = new_world;
         }
@@ -748,18 +759,40 @@ fn render_world(
             crate::render::hud::draw_center_text(
                 &mut screen.fb,
                 &data.0.vga,
-                "YOU DIED - PRESS ANY KEY",
+                "YOU DIED",
                 70,
                 4,
             );
         }
         PlayState::LevelComplete => {
+            draw_intermission(
+                &mut screen.fb,
+                &data.0.vga,
+                &Intermission {
+                    secret_floor: world.map_index == 9,
+                    time_secs: world.elapsed,
+                    par_secs: world.par_time * 60.0,
+                    kill: world.kill_percent(),
+                    secret: world.secret_percent(),
+                    treasure: world.treasure_percent(),
+                    bonus: world.last_bonus,
+                },
+            );
+        }
+        PlayState::GameOver => {
             crate::render::hud::draw_center_text(
                 &mut screen.fb,
                 &data.0.vga,
-                "LEVEL COMPLETE",
-                70,
-                2,
+                "GAME OVER",
+                60,
+                4,
+            );
+            crate::render::hud::draw_center_text(
+                &mut screen.fb,
+                &data.0.vga,
+                "PRESS ANY KEY",
+                84,
+                0x0f,
             );
         }
         PlayState::Playing => {}
@@ -768,7 +801,13 @@ fn render_world(
     // The level-select overlay covers the frozen world while it is open;
     // otherwise the touch controls are drawn over the 3D view.
     if menu.open {
-        draw_level_select(&mut screen.fb, &data.0.vga, menu.episode, menu.map);
+        draw_level_select(
+            &mut screen.fb,
+            &data.0.vga,
+            menu.episode,
+            menu.map,
+            menu.difficulty,
+        );
     } else {
         draw_controls(&mut screen.fb, &data.0.vga, &controls);
     }
@@ -811,16 +850,46 @@ fn play_sounds(
     }
 }
 
-fn handle_transitions(mut world: ResMut<WorldRes>, data: Res<DataRes>) {
+#[allow(clippy::too_many_arguments)]
+fn handle_transitions(
+    mut world: ResMut<WorldRes>,
+    data: Res<DataRes>,
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    controls: Res<TouchControls>,
+    mut menu: ResMut<LevelMenu>,
+    mut captured: ResMut<MouseCaptured>,
+    mut cursor: Query<&mut CursorOptions, With<Window>>,
+    mut input: ResMut<InputRes>,
+) {
+    let any_key = keys.get_just_pressed().next().is_some()
+        || buttons.just_pressed(MouseButton::Left)
+        || controls.tap.is_some();
     match world.0.state {
         PlayState::Died => {
             if world.0.transition_timer > 2.5 {
-                world.0.restart_level(&data.0);
+                world.0.after_death(&data.0);
             }
         }
         PlayState::LevelComplete => {
-            if world.0.transition_timer > 1.5 {
+            if world.0.transition_timer > 5.0 || (world.0.transition_timer > 0.6 && any_key) {
                 world.0.next_level(&data.0);
+            }
+        }
+        PlayState::GameOver => {
+            if world.0.transition_timer > 3.5 {
+                // Back to the level-select menu for a fresh run.
+                let (episode, map, difficulty) =
+                    (world.0.episode, world.0.map_index, world.0.difficulty);
+                if let Some(new_world) = World::new(&data.0, episode, map, difficulty) {
+                    world.0 = new_world;
+                }
+                menu.open = true;
+                menu.episode = episode;
+                menu.map = map;
+                menu.difficulty = difficulty.index();
+                input.0 = InputState::default();
+                set_cursor_capture(&mut cursor, &mut captured, false);
             }
         }
         PlayState::Playing => {}
@@ -889,6 +958,7 @@ mod tests {
             open: true,
             episode: 0,
             map: 0,
+            difficulty: Difficulty::Normal.index(),
         });
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());
@@ -933,6 +1003,7 @@ mod tests {
             open: true,
             episode: 0,
             map: 0,
+            difficulty: Difficulty::Normal.index(),
         });
         app.insert_resource(MouseCaptured(false));
         app.insert_resource(InputRes::default());
@@ -946,6 +1017,38 @@ mod tests {
         let menu = app.world().resource::<LevelMenu>();
         assert_eq!(menu.map, crate::render::hud::EPISODE_MAPS - 1);
         assert_eq!(menu.episode, crate::render::hud::EPISODES - 1);
+    }
+
+    /// The menu's difficulty selection is applied to the started level.
+    #[test]
+    fn level_menu_selects_difficulty() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = crate::data::GameData::load(&dir).unwrap();
+        let world = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(DataRes(data));
+        app.insert_resource(WorldRes(world));
+        app.insert_resource(LevelMenu {
+            open: true,
+            episode: 0,
+            map: 0,
+            difficulty: Difficulty::Normal.index(),
+        });
+        app.insert_resource(MouseCaptured(false));
+        app.insert_resource(InputRes::default());
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<crate::touch::TouchControls>();
+        app.init_resource::<crate::game::browser::Browser>();
+        app.add_systems(Update, handle_level_menu);
+
+        // One `D` from NORMAL lands on HARD.
+        tap(&mut app, KeyCode::KeyD);
+        tap(&mut app, KeyCode::Enter);
+        let world = app.world().resource::<WorldRes>();
+        assert_eq!(world.0.difficulty, Difficulty::Hard);
     }
 
     /// Guard against regressing the `wav` Bevy feature: the game wraps Wolf3D

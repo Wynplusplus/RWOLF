@@ -189,6 +189,50 @@ fn cast(
             return None;
         }
         let tile = level.tile(map_x as usize, map_y as usize);
+
+        // A sliding pushwall is a solid plane inside its tile.
+        if let Some(pw) = level.push_wall_at(map_x as usize, map_y as usize) {
+            let base = pw.base as usize;
+            let plane = pw.plane();
+            let perp_tile = pw.perp_tile() as f32;
+            let (t, other, vertical) = if pw.dir.vertical() {
+                if rdx.abs() < 1e-9 {
+                    continue;
+                }
+                let t = (plane - cam.x) / rdx;
+                (t, cam.y + rdy * t, true)
+            } else {
+                if rdy.abs() < 1e-9 {
+                    continue;
+                }
+                let t = (plane - cam.y) / rdy;
+                (t, cam.x + rdx * t, false)
+            };
+            // The plane may sit exactly on the tile boundary at the start.
+            if t + 1e-3 < perp {
+                continue;
+            }
+            let frac = other - perp_tile;
+            if !(0.0..1.0).contains(&frac) {
+                continue;
+            }
+            let texture = if vertical {
+                (base - 1) * 2 + 1
+            } else {
+                (base - 1) * 2
+            };
+            let mut u = frac;
+            if (vertical && rdx < 0.0) || (!vertical && rdy > 0.0) {
+                u = 1.0 - u;
+            }
+            return Some(Hit {
+                perp: t.max(perp),
+                texture,
+                tex_u: u,
+                door_offset: None,
+            });
+        }
+
         if tile == 0 {
             continue;
         }

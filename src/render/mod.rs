@@ -20,7 +20,7 @@ mod tests {
     use crate::data::GameData;
     use crate::game::actor::Difficulty;
     use crate::game::level::build_level;
-    use crate::game::world::World;
+    use crate::game::world::{InputState, World};
     use crate::data::Map;
 
     /// Render the first frame of E1M1 and dump it as a PPM for visual
@@ -127,7 +127,7 @@ mod tests {
         };
         let data = GameData::load(&dir).unwrap();
         let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
-        crate::render::hud::draw_level_select(&mut fb, &data.vga, 2, 4);
+        crate::render::hud::draw_level_select(&mut fb, &data.vga, 2, 4, 2);
         let mut ppm = format!("P6\n{} {}\n255\n", VIEW_W, VIEW_H).into_bytes();
         for &idx in &fb.pixels {
             ppm.extend_from_slice(&palette::to_rgb(idx));
@@ -183,6 +183,102 @@ mod tests {
             ppm.extend_from_slice(&palette::to_rgb(idx));
         }
         std::fs::write(std::env::temp_dir().join("wolf3d_touch.ppm"), ppm).unwrap();
+    }
+
+    /// Render the end-of-floor intermission for visual inspection.
+    #[test]
+    fn render_intermission() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+        let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+        crate::render::hud::draw_intermission(
+            &mut fb,
+            &data.vga,
+            &crate::render::hud::Intermission {
+                secret_floor: false,
+                time_secs: 83.0,
+                par_secs: 90.0,
+                kill: 100,
+                secret: 50,
+                treasure: 80,
+                bonus: 12500,
+            },
+        );
+        let mut ppm = format!("P6\n{} {}\n255\n", VIEW_W, VIEW_H).into_bytes();
+        for &idx in &fb.pixels {
+            ppm.extend_from_slice(&palette::to_rgb(idx));
+        }
+        std::fs::write(std::env::temp_dir().join("wolf3d_intermission.ppm"), ppm).unwrap();
+    }
+
+    /// Render the E1M1 pushwall at several points as it slides, for visual
+    /// inspection.
+    #[test]
+    fn render_pushwall() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+        let mut world = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        world.player.x = 10.5;
+        world.player.y = 14.5;
+        world.player.angle = std::f32::consts::FRAC_PI_2; // north
+        world.use_action();
+        for (n, secs) in [0.4f32, 0.9, 1.5, 2.2, 3.0, 4.0].into_iter().enumerate() {
+            // Re-simulate from the start each time.
+            let mut world = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+            world.player.x = 10.5;
+            world.player.y = 14.5;
+            world.player.angle = std::f32::consts::FRAC_PI_2;
+            world.use_action();
+            for _ in 0..(secs * 60.0) as usize {
+                world.update(1.0 / 60.0, &InputState::default());
+            }
+            let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+            let cam = Camera {
+                x: world.player.x,
+                y: world.player.y,
+                angle: world.player.angle,
+            };
+            let mut zbuf = [f32::INFINITY; VIEW_W];
+            render_walls(&mut fb, &data.vswap, &world.level, cam, &mut zbuf);
+            let mut ppm = format!("P6\n{} {}\n255\n", VIEW_W, VIEW_H).into_bytes();
+            for &idx in &fb.pixels {
+                ppm.extend_from_slice(&palette::to_rgb(idx));
+            }
+            let out = std::env::temp_dir().join(format!("wolf3d_pushwall_{n}.ppm"));
+            std::fs::write(&out, ppm).unwrap();
+        }
+        eprintln!("wrote pushwall frames");
+    }
+
+    /// Render every floor from four headings; catches sprite/texture indexing
+    /// errors anywhere in the data set.
+    #[test]
+    fn render_every_map() {
+        let Some(dir) = crate::data::find_data_dir() else {
+            return;
+        };
+        let data = GameData::load(&dir).unwrap();
+        for i in 0..60 {
+            let world = World::new(&data, i / 10, i % 10, Difficulty::Hard).unwrap();
+            for angle in [0.0f32, 1.5708, 3.1416, 4.7124] {
+                let mut fb = Framebuffer::new(VIEW_W, VIEW_H);
+                let cam = Camera {
+                    x: world.player.x,
+                    y: world.player.y,
+                    angle,
+                };
+                let mut zbuf = [f32::INFINITY; VIEW_W];
+                render_walls(&mut fb, &data.vswap, &world.level, cam, &mut zbuf);
+                let sprites = collect_sprites(&world.level, &world.actors, angle);
+                render_sprites(&mut fb, &data.vswap, cam, &zbuf, &sprites);
+                render_weapon(&mut fb, &data.vswap, world.player.weapon_sprite());
+                draw_status_bar(&mut fb, &data.vga, &world.hud);
+            }
+        }
     }
 
     /// Regression: the camera sits `FOCAL` behind the player in the original,

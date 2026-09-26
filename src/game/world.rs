@@ -6,7 +6,28 @@ use crate::data::generated::*;
 use crate::data::{GameData, Map};
 use crate::game::actor::{Actor, ActorKind, ActorState, Difficulty, dir_angle, spawn_actors};
 use crate::game::hud::Hud;
-use crate::game::level::{DoorState, Item, Level, build_level};
+use crate::game::level::{DoorState, Item, Level, PushDir, PushWall, build_level};
+use crate::game::level::{ELEVATOR_TILE, PUSHWALL_TILE};
+
+/// Where completing a secret floor returns to, per episode (the original's
+/// `ElevatorBackTo`).
+pub const ELEVATOR_BACK_TO: [usize; 6] = [1, 1, 7, 3, 5, 3];
+
+/// Sound chunk for a pushable wall sliding (the original's `PUSHWALLSND`).
+const PUSHWALL_SND: usize = 46;
+/// The player's score bonus for finishing a secret floor.
+pub const SECRET_BONUS: i32 = 15_000;
+
+/// Per-floor par times in minutes, from the original's `parTimes`. Zero marks
+/// the boss and secret floors, which have no par time.
+pub const PAR_TIMES: [f32; 60] = [
+    1.5, 2.0, 2.0, 3.5, 3.0, 3.0, 2.5, 2.5, 0.0, 0.0, // Episode 1
+    1.5, 3.5, 3.0, 2.0, 4.0, 6.0, 1.0, 3.0, 0.0, 0.0, // Episode 2
+    1.5, 1.5, 2.5, 2.5, 3.5, 2.5, 2.0, 6.0, 0.0, 0.0, // Episode 3
+    2.0, 2.0, 1.5, 1.0, 4.5, 3.5, 2.0, 4.5, 0.0, 0.0, // Episode 4
+    2.5, 1.5, 2.5, 2.5, 4.0, 3.0, 4.5, 3.5, 0.0, 0.0, // Episode 5
+    6.5, 4.0, 4.5, 6.0, 5.0, 5.5, 5.5, 8.5, 0.0, 0.0, // Episode 6
+];
 
 /// Radius of the player's collision circle, in tiles (`MINDIST`).
 pub const PLAYER_RADIUS: f32 = 22528.0 / 65536.0;
@@ -27,6 +48,7 @@ pub enum PlayState {
     Playing,
     Died,
     LevelComplete,
+    GameOver,
 }
 
 #[derive(Clone, Default)]
@@ -128,6 +150,18 @@ pub struct World {
     /// Sound chunk indices requested this frame.
     pub sounds: Vec<usize>,
     pub transition_timer: f32,
+    /// Enemies spawned on this floor and killed so far.
+    pub kill_total: usize,
+    pub kill_count: usize,
+    /// Pushwalls found (`secret_total` lives on the level).
+    pub secret_count: usize,
+    pub treasure_count: usize,
+    /// The elevator used was the secret one; the next level is the secret floor.
+    pub pending_secret: bool,
+    /// Score awarded by the intermission for the floor just finished.
+    pub last_bonus: i32,
+    /// Par time of the current floor in minutes (0 for boss/secret floors).
+    pub par_time: f32,
 }
 
 impl World {
@@ -156,6 +190,7 @@ impl World {
             face_frame: player.face_frame,
             level: map_index + 1,
         };
+        let kill_total = actors.len();
         Self {
             level,
             actors,
@@ -168,6 +203,37 @@ impl World {
             elapsed: 0.0,
             sounds: Vec::new(),
             transition_timer: 0.0,
+            kill_total,
+            kill_count: 0,
+            secret_count: 0,
+            treasure_count: 0,
+            pending_secret: false,
+            last_bonus: 0,
+            par_time: PAR_TIMES[(episode * 10 + map_index).min(PAR_TIMES.len() - 1)],
+        }
+    }
+
+    pub fn kill_percent(&self) -> i32 {
+        if self.kill_total == 0 {
+            0
+        } else {
+            (self.kill_count * 100 / self.kill_total) as i32
+        }
+    }
+
+    pub fn secret_percent(&self) -> i32 {
+        if self.level.secret_total == 0 {
+            0
+        } else {
+            (self.secret_count * 100 / self.level.secret_total) as i32
+        }
+    }
+
+    pub fn treasure_percent(&self) -> i32 {
+        if self.level.treasure_total == 0 {
+            0
+        } else {
+            (self.treasure_count * 100 / self.level.treasure_total) as i32
         }
     }
 
@@ -183,6 +249,7 @@ impl World {
 
         self.update_player(dt, input);
         self.update_doors(dt);
+        self.update_push_wall(dt);
         self.update_actors(dt);
         self.update_items();
         self.check_exit();
@@ -323,7 +390,7 @@ impl World {
             self.damage_actor(i, damage);
             self.sounds.push(27); // HITENEMYSND
         } else {
-            self.sounds.push(32); // SHOOTSND (wall impact)
+            self.sounds.push(0); // HITWALLSND
         }
     }
 
@@ -339,6 +406,7 @@ impl World {
             a.state = ActorState::Dying;
             a.timer = 0.0;
             self.player.score += 100;
+            self.kill_count += 1;
             self.sounds.push(death_sound(a.kind));
         } else {
             a.awake = true;
@@ -401,6 +469,61 @@ impl World {
         self.actors
             .iter()
             .any(|a| a.is_alive() && circle_overlaps_tile(a.x, a.y, PLAYER_RADIUS, x, y))
+    }
+
+    /// Slide the active pushwall and open the passage behind it.
+    fn update_push_wall(&mut self, dt: f32) {
+        let Some(mut pw) = self.level.push_wall.take() else {
+            return;
+        };
+        if pw.active {
+            // The original crosses one tile per 128 tics (~1.8 s), so about
+            // 0.55 tiles/s; two tiles take roughly 3.6 s.
+            pw.pos += 0.55 * dt;
+            while pw.pos >= 1.0 {
+                pw.pos -= 1.0;
+                // The tile the wall leaves becomes floor.
+                self.level.tilemap[pw.y * self.level.width + pw.x] = 0;
+                let (dx, dy) = pw.dir.delta();
+                let nx = pw.x as i32 + dx;
+                let ny = pw.y as i32 + dy;
+                if nx < 0
+                    || ny < 0
+                    || nx as usize >= self.level.width
+                    || ny as usize >= self.level.height
+                {
+                    pw.active = false;
+                    break;
+                }
+                pw.x = nx as usize;
+                pw.y = ny as usize;
+                pw.moved += 1;
+                let idx = pw.y * self.level.width + pw.x;
+                if pw.moved >= 2 {
+                    // The wall comes to rest and stays solid.
+                    self.level.tilemap[idx] = pw.base;
+                    pw.active = false;
+                    break;
+                }
+                self.level.tilemap[idx] = 0xC0 | pw.base;
+                // Pre-mark the next tile solid, as the original does; if it is
+                // blocked the wall stops here.
+                let nnx = pw.x as i32 + dx;
+                let nny = pw.y as i32 + dy;
+                if nnx < 0
+                    || nny < 0
+                    || nnx as usize >= self.level.width
+                    || nny as usize >= self.level.height
+                    || self.level.is_solid(nnx as usize, nny as usize)
+                {
+                    self.level.tilemap[idx] = pw.base;
+                    pw.active = false;
+                    break;
+                }
+                self.level.tilemap[nny as usize * self.level.width + nnx as usize] = pw.base;
+            }
+        }
+        self.level.push_wall = Some(pw);
     }
 
     fn update_actors(&mut self, dt: f32) {
@@ -481,7 +604,7 @@ impl World {
             a.anim += dt;
             if a.anim > 0.18 {
                 a.anim = 0.0;
-                a.walk_frame = (a.walk_frame + 1) % 4;
+                a.walk_frame = (a.walk_frame + 1) % a.kind.walk_frames();
             }
 
             let d = dist(a.x, a.y, px, py);
@@ -502,7 +625,34 @@ impl World {
             } else {
                 (0.0, 0.0)
             };
-            self.move_actor(i, mvx, mvy);
+            if !self.move_actor(i, mvx, mvy) {
+                // Blocked: try to sidestep around whatever is in the way.
+                if !self.try_move_actor(i, mvy, -mvx) {
+                    self.try_move_actor(i, -mvy, mvx);
+                }
+            }
+        }
+
+        // Sight and sound alerts spread to nearby actors, so a room wakes up
+        // together instead of one guard at a time.
+        let alerters: Vec<(f32, f32)> = self
+            .actors
+            .iter()
+            .filter(|a| a.awake && a.is_alive())
+            .map(|a| (a.x, a.y))
+            .collect();
+        if !alerters.is_empty() {
+            for a in self.actors.iter_mut() {
+                if a.awake || !a.is_alive() {
+                    continue;
+                }
+                if alerters
+                    .iter()
+                    .any(|&(x, y)| dist(x, y, a.x, a.y) < 10.0)
+                {
+                    a.awake = true;
+                }
+            }
         }
 
         if damage_to_player > 0 && player_alive {
@@ -532,12 +682,32 @@ impl World {
         a.anim += dt;
         if a.anim > 0.25 {
             a.anim = 0.0;
-            a.walk_frame = (a.walk_frame + 1) % 4;
+            a.walk_frame = (a.walk_frame + 1) % a.kind.walk_frames();
         }
     }
 
-    fn move_actor(&mut self, i: usize, dx: f32, dy: f32) {
-        self.try_move_actor(i, dx, dy);
+    /// Move a chasing actor, opening a closed door in the way like the
+    /// original's `TryWalk`.
+    fn move_actor(&mut self, i: usize, dx: f32, dy: f32) -> bool {
+        let (ax, ay) = (self.actors[i].x, self.actors[i].y);
+        let (tx, ty) = if dx.abs() > dy.abs() {
+            ((ax + dx.signum() * 0.6).floor() as i32, ay.floor() as i32)
+        } else {
+            (ax.floor() as i32, (ay + dy.signum() * 0.6).floor() as i32)
+        };
+        if tx >= 0
+            && ty >= 0
+            && (tx as usize) < self.level.width
+            && (ty as usize) < self.level.height
+        {
+            if let Some(d) = self.level.is_door(tx as usize, ty as usize) {
+                if self.level.doors[d].state == DoorState::Closed && self.level.doors[d].lock == 0 {
+                    self.level.doors[d].state = DoorState::Opening;
+                    self.sounds.push(18); // OPENDOORSND
+                }
+            }
+        }
+        self.try_move_actor(i, dx, dy)
     }
 
     fn try_move_actor(&mut self, i: usize, dx: f32, dy: f32) -> bool {
@@ -670,6 +840,9 @@ impl World {
         }
         if consumed {
             self.level.statics[i].active = false;
+            if item.is_treasure() {
+                self.treasure_count += 1;
+            }
         }
     }
 
@@ -689,9 +862,15 @@ impl World {
     fn check_exit(&mut self) {
         let tx = self.player.x.floor() as usize;
         let ty = self.player.y.floor() as usize;
-        if tx < self.level.width && ty < self.level.height {
-            let obj = self.level.object(tx, ty);
-            if obj == crate::game::level::EXIT_TILE {
+        if tx < self.level.width && ty < self.level.height
+            && self.level.object(tx, ty) == crate::game::level::EXIT_TILE
+        {
+            // The exit tile only opens once the floor's boss is dead.
+            let boss_alive = self
+                .actors
+                .iter()
+                .any(|a| a.kind.is_boss() && a.is_alive());
+            if !boss_alive {
                 self.complete_level();
             }
         }
@@ -725,16 +904,29 @@ impl World {
         if uy >= self.level.height {
             uy = self.level.height - 1;
         }
+        let push_dir = if east_west {
+            if dx > 0.0 { PushDir::East } else { PushDir::West }
+        } else if dy > 0.0 {
+            PushDir::South
+        } else {
+            PushDir::North
+        };
+
+        // Pushable wall. The original checks plane 1 for the marker first.
+        if self.level.object(ux, uy) == PUSHWALL_TILE {
+            self.push_wall(ux, uy, push_dir);
+            return;
+        }
 
         // Elevator switch. Compare the raw tilemap byte like the original's
         // `doornum == ELEVATORTILE`: masking off the high bits would make door
         // number 21 (`0x80 | 21`) look like the switch and end the level.
-        if east_west && self.level.tile(ux, uy) == crate::game::level::ELEVATOR_TILE as u8 {
-            let secret = self.level.wall_tile(
+        if east_west && self.level.tile(ux, uy) == ELEVATOR_TILE as u8 {
+            let (ptx, pty) = (
                 self.player.x.floor() as usize,
                 self.player.y.floor() as usize,
-            ) == crate::game::level::ALT_ELEVATOR_TILE as u8;
-            self.level.secret_floor = secret;
+            );
+            self.pending_secret = self.level.is_alt_elevator(ptx, pty);
             self.sounds.push(40); // LEVELDONESND
             self.complete_level();
             return;
@@ -746,6 +938,52 @@ impl World {
             return;
         }
         self.sounds.push(20); // DONOTHINGSND
+    }
+
+    /// Begin pushing the wall at `(x, y)` in `dir`, if it can move.
+    fn push_wall(&mut self, x: usize, y: usize, dir: PushDir) {
+        if self
+            .level
+            .push_wall
+            .as_ref()
+            .map(|p| p.active)
+            .unwrap_or(false)
+        {
+            self.sounds.push(6); // NOWAYSND
+            return;
+        }
+        let base = self.level.tile(x, y) & 0x3F;
+        if base == 0 {
+            self.sounds.push(20); // DONOTHINGSND
+            return;
+        }
+        let (dx, dy) = dir.delta();
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0
+            || ny < 0
+            || nx as usize >= self.level.width
+            || ny as usize >= self.level.height
+            || self.level.is_solid(nx as usize, ny as usize)
+        {
+            self.sounds.push(6); // NOWAYSND
+            return;
+        }
+        let (nxu, nyu) = (nx as usize, ny as usize);
+        self.level.tilemap[y * self.level.width + x] = 0xC0 | base;
+        self.level.tilemap[nyu * self.level.width + nxu] = base;
+        self.level.push_wall = Some(PushWall {
+            x,
+            y,
+            dir,
+            pos: 0.0,
+            moved: 0,
+            base,
+            active: true,
+        });
+        self.secret_count += 1;
+        self.sounds.push(PUSHWALL_SND);
+        self.sync_hud();
     }
 
     fn operate_door(&mut self, index: usize) {
@@ -772,59 +1010,115 @@ impl World {
     }
 
     fn complete_level(&mut self) {
+        if self.state == PlayState::LevelComplete {
+            return;
+        }
         self.state = PlayState::LevelComplete;
         self.transition_timer = 0.0;
+        self.last_bonus = self.compute_bonus();
+        self.player.score += self.last_bonus;
+        self.sync_hud();
+    }
+
+    /// End-of-floor bonus, mirroring `LevelCompleted`: a time bonus against par
+    /// plus `PERCENT100AMT` for each 100% ratio.
+    fn compute_bonus(&self) -> i32 {
+        const PERCENT100AMT: i32 = 10_000;
+        let mut bonus = 0;
+        if self.par_time > 0.0 {
+            let left = (self.par_time * 60.0 - self.elapsed).max(0.0);
+            bonus += (left * 500.0) as i32;
+        }
+        if self.kill_total > 0 && self.kill_percent() == 100 {
+            bonus += PERCENT100AMT;
+        }
+        if self.level.secret_total > 0 && self.secret_percent() == 100 {
+            bonus += PERCENT100AMT;
+        }
+        if self.level.treasure_total > 0 && self.treasure_percent() == 100 {
+            bonus += PERCENT100AMT;
+        }
+        bonus
     }
 
     /// Advance to the next map, keeping the player's stats.
+    ///
+    /// Mirrors the original's progression: floors 1..=8 go to the next floor,
+    /// the boss floor (index 8) advances the episode, the secret floor (index
+    /// 9) returns to `ElevatorBackTo`, and a secret elevator jumps to index 9.
     pub fn next_level(&mut self, data: &GameData) {
-        let mut next = self.map_index + 1;
-        let mut episode = self.episode;
-        if next >= 10 {
-            next = 0;
-            episode = (episode + 1) % 6;
+        let (next, episode) = if self.pending_secret {
+            (9, self.episode)
+        } else if self.map_index == 9 {
+            (ELEVATOR_BACK_TO[self.episode.min(5)], self.episode)
+        } else if self.map_index >= 8 {
+            (0, (self.episode + 1) % 6)
+        } else {
+            (self.map_index + 1, self.episode)
+        };
+        self.pending_secret = false;
+        if self.map_index == 9 {
+            // The original awards a fixed bonus for finishing a secret floor.
+            self.player.score += SECRET_BONUS;
         }
-        if let Some(map) = data.maps.get(episode * 10 + next) {
-            let level = build_level(map, episode, next);
-            let actors = spawn_actors(level.width, level.height, &map.objects, self.difficulty);
-            let (px, py, pa) = level.player_start;
-            self.level = level;
-            self.actors = actors;
-            self.player.x = px;
-            self.player.y = py;
-            self.player.angle = pa;
-            self.player.attack_timer = 0.0;
-            self.player.damage_flash = 0.0;
-            self.map_index = next;
-            self.episode = episode;
-            self.state = PlayState::Playing;
+        self.load_map(data, episode, next);
+    }
+
+    /// Resolve a death once the pause has elapsed: spend a life and restart,
+    /// or end the game when none are left.
+    pub fn after_death(&mut self, data: &GameData) -> bool {
+        if self.player.lives > 0 {
+            self.player.lives -= 1;
+            self.restart_level(data);
+            false
+        } else {
+            self.state = PlayState::GameOver;
             self.transition_timer = 0.0;
-            self.sync_hud();
+            self.sounds.push(17); // GAMEOVERSND
+            true
         }
     }
 
-    /// Restart the current level after death.
+    /// Restart the current level after death. The caller deducts a life.
+    /// Like the original's `Died`, the player loses their keys and weapons.
     pub fn restart_level(&mut self, data: &GameData) {
-        if self.player.lives > 0 {
-            self.player.lives -= 1;
-        }
         self.player.health = 100;
-        self.player.ammo = (self.player.ammo).max(8);
-        if let Some(map) = data.maps.get(self.episode * 10 + self.map_index) {
-            let level = build_level(map, self.episode, self.map_index);
-            let actors = spawn_actors(level.width, level.height, &map.objects, self.difficulty);
-            let (px, py, pa) = level.player_start;
-            self.level = level;
-            self.actors = actors;
-            self.player.x = px;
-            self.player.y = py;
-            self.player.angle = pa;
-            self.player.attack_timer = 0.0;
-            self.player.damage_flash = 0.0;
-            self.state = PlayState::Playing;
-            self.transition_timer = 0.0;
-            self.sync_hud();
-        }
+        self.player.ammo = 8;
+        self.player.weapon = 1;
+        self.player.best_weapon = 1;
+        self.player.keys = 0;
+        self.pending_secret = false;
+        let (episode, map) = (self.episode, self.map_index);
+        self.load_map(data, episode, map);
+    }
+
+    /// Replace the current map, resetting per-floor counters.
+    fn load_map(&mut self, data: &GameData, episode: usize, map_index: usize) {
+        let Some(map) = data.maps.get(episode * 10 + map_index) else {
+            return;
+        };
+        let level = build_level(map, episode, map_index);
+        let actors = spawn_actors(level.width, level.height, &map.objects, self.difficulty);
+        let (px, py, pa) = level.player_start;
+        self.kill_total = actors.len();
+        self.kill_count = 0;
+        self.secret_count = 0;
+        self.treasure_count = 0;
+        self.level = level;
+        self.actors = actors;
+        self.player.x = px;
+        self.player.y = py;
+        self.player.angle = pa;
+        self.player.attack_timer = 0.0;
+        self.player.damage_flash = 0.0;
+        self.map_index = map_index;
+        self.episode = episode;
+        self.state = PlayState::Playing;
+        self.transition_timer = 0.0;
+        self.elapsed = 0.0;
+        self.last_bonus = 0;
+        self.par_time = PAR_TIMES[(episode * 10 + map_index).min(PAR_TIMES.len() - 1)];
+        self.sync_hud();
     }
 
     fn sync_hud(&mut self) {
@@ -1034,6 +1328,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn death_spends_a_life_then_ends_the_game() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        w.player.lives = 1;
+        w.state = PlayState::Died;
+        assert!(!w.after_death(&data));
+        assert_eq!(w.player.lives, 0);
+        assert_eq!(w.state, PlayState::Playing);
+        // With no lives left the next death is a game over.
+        w.state = PlayState::Died;
+        assert!(w.after_death(&data));
+        assert_eq!(w.state, PlayState::GameOver);
+    }
+
+    #[test]
+    fn intermission_bonus_rewards_100_percent() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        w.kill_count = w.kill_total;
+        w.secret_count = w.level.secret_total;
+        w.treasure_count = w.level.treasure_total;
+        w.elapsed = 0.0;
+        w.complete_level();
+        assert_eq!(w.kill_percent(), 100);
+        assert_eq!(w.secret_percent(), 100);
+        assert_eq!(w.treasure_percent(), 100);
+        assert!(w.last_bonus >= 30_000, "bonus too small: {}", w.last_bonus);
+    }
+
+    /// A pushable wall slides two tiles and opens the passage behind it.
+    #[test]
+    fn pushwall_slides_and_opens_a_passage() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        assert!(w.level.pushwalls.contains(&(10, 13)), "E1M1 pushwall moved");
+        assert!(w.level.is_solid(10, 13));
+        // Stand south of the wall and face it (north).
+        w.player.x = 10.5;
+        w.player.y = 14.5;
+        w.player.angle = std::f32::consts::FRAC_PI_2;
+        w.use_action();
+        assert!(
+            w.level.push_wall.as_ref().map(|p| p.active).unwrap_or(false),
+            "the pushwall did not start moving"
+        );
+        assert_eq!(w.secret_count, 1, "the pushwall was not counted as a secret");
+        for _ in 0..600 {
+            w.update(1.0 / 60.0, &InputState::default());
+        }
+        assert!(
+            !w.level.is_solid(10, 13),
+            "the tile behind the pushwall is still solid"
+        );
+        assert!(
+            w.level.is_solid(10, 11),
+            "the pushwall did not come to rest two tiles away"
+        );
+    }
+
+    /// The secret elevator leads to the secret floor, which returns to
+    /// `ElevatorBackTo`.
+    #[test]
+    fn secret_elevator_routes_to_the_secret_floor() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        assert_eq!(w.level.tile(9, 51), ELEVATOR_TILE as u8, "switch moved");
+        assert!(w.level.is_alt_elevator(10, 51), "secret floor moved");
+        w.player.x = 10.5;
+        w.player.y = 51.5;
+        w.player.angle = std::f32::consts::PI; // face west, towards the switch
+        w.use_action();
+        assert_eq!(w.state, PlayState::LevelComplete);
+        assert!(w.pending_secret, "secret elevator not detected");
+        w.next_level(&data);
+        assert_eq!(w.map_index, 9, "secret elevator did not reach the secret floor");
+        assert_eq!(w.episode, 0);
+        // Finishing the secret floor returns to ElevatorBackTo[0].
+        w.complete_level();
+        w.next_level(&data);
+        assert_eq!(w.map_index, ELEVATOR_BACK_TO[0]);
+        assert_eq!(w.episode, 0);
+    }
+
+    /// A normal elevator advances to the next floor, not the secret one.
+    #[test]
+    fn normal_elevator_advances_one_floor() {
+        let Some(data) = data() else { return };
+        let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        w.player.x = 25.5;
+        w.player.y = 47.5;
+        w.player.angle = 0.0; // face east, towards the switch
+        w.use_action();
+        assert_eq!(w.state, PlayState::LevelComplete);
+        assert!(!w.pending_secret);
+        w.next_level(&data);
+        assert_eq!(w.map_index, 1);
+        assert_eq!(w.episode, 0);
+    }
+
     /// The elevator switch must still end the level after the door fix.
     #[test]
     fn elevator_switch_completes_the_level() {
@@ -1086,6 +1480,8 @@ mod tests {
     fn doors_open_then_close() {
         let Some(data) = data() else { return };
         let mut w = World::new(&data, 0, 0, Difficulty::Normal).unwrap();
+        // Isolate the door from wandering enemies that would keep it open.
+        w.actors.clear();
         let Some((idx, vertical, x, y)) = w
             .level
             .doors
@@ -1137,6 +1533,49 @@ mod tests {
         w.update(1.0 / 60.0, &InputState::default());
         assert!(!w.level.statics[idx].active, "clip was not picked up");
         assert!(w.player.ammo > 0, "ammo did not increase");
+    }
+
+    /// Stress every map with pseudo-random play (move, turn, fire, use) and
+    /// make sure nothing panics.
+    #[test]
+    fn all_maps_survive_a_simulation() {
+        let Some(data) = data() else { return };
+        for i in 0..60 {
+            let (episode, map) = (i / 10, i % 10);
+            let mut w = World::new(&data, episode, map, Difficulty::Hard).unwrap();
+            let mut seed = 0x9E37_79B9u32;
+            let mut next = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed
+            };
+            for _ in 0..2500 {
+                let f = (next() % 3) as f32 - 1.0;
+                let s = (next() % 3) as f32 - 1.0;
+                let t = (next() % 3) as f32 - 1.0;
+                let fire = next() & 1 == 0;
+                let use_pressed = next() % 7 == 0;
+                let input = InputState {
+                    forward: f,
+                    strafe: s,
+                    turn: t,
+                    fire,
+                    fire_pressed: fire,
+                    use_pressed,
+                    ..Default::default()
+                };
+                w.update(1.0 / 60.0, &input);
+                if use_pressed {
+                    w.use_action();
+                }
+                if w.state == PlayState::LevelComplete {
+                    w.next_level(&data);
+                } else if w.state == PlayState::Died {
+                    w.restart_level(&data);
+                }
+            }
+        }
     }
 
     #[test]
